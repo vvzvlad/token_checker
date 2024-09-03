@@ -27,4 +27,4 @@ jobs:
       with:
         context: .
         push: true
-        tags: vvzvlad/dns_proxy:latest
+        tags: vvzvlad/token_checker:latest
