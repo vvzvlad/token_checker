@@ -1,0 +1,11 @@
+ansible-output-parser==0.1.0
+certifi==2024.7.4
+charset-normalizer==3.3.2
+colorama==0.4.6
+future==1.0.0
+grist-api==0.1.0
+idna==3.8
+proxmoxer==2.1.0
+PyYAML==6.0.2
+requests==2.32.3
+urllib3==2.2.2
