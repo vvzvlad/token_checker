@@ -117,11 +117,19 @@ def check_token_balance(address, api_endpoint, token_symbol, logger):
             logger.error(f"Error while checking token transactions for address {address}")
             raise Exception(f"Error while checking token transactions for address {address}")
     except Exception as e:
-        logger.error(f"Fail: {e}\n{traceback.format_exc()}")
+        #logger.error(f"Fail: {e}\n{traceback.format_exc()}")
         logger.error(f"Error while checking token transactions for address {address}: {e}")
         raise Exception(f"Error while checking token transactions for address {address}: {e}")
 
 
+def find_none_value(grist):
+    wallets = grist.fetch_table()
+    for wallet in wallets:
+        if (wallet.Value is None or wallet.Value == "" ):
+            if (wallet.Address is not None and wallet.Address != ""):
+                return wallet
+    return None
+    
 
 def main():
     colorama.init(autoreset=True)
@@ -144,21 +152,23 @@ def main():
             logger.info(f"Endpoint: {endpoint}")
             token_symbol = grist.find_settings("Token Symbol")
             logger.info(f"Token Symbol: {token_symbol}")
-            wallets = grist.fetch_table()
-            for wallet in wallets:
-                try:
-                    if wallet.Value == "" or wallet.Value is None:
-                        logger.info(f"Check wallet {wallet.Address}...")
-                        value, msg = check_token_balance(wallet.Address, endpoint, token_symbol, logger)
-                        grist.update(wallet.id, {"Value": value})  
-                        grist.update(wallet.id, {"Comment": msg})
-                except Exception as e:
-                    grist.update(wallet.id, {"Value": "--"})  
-                    logger.error(f"Error occurred: {e}")
-                    grist.update(wallet.id, {"Comment": f"Error: {e}"})
-            time.sleep(10)
+            
+            try:
+                none_value_wallet = find_none_value(grist)
+                if none_value_wallet is None:
+                    logger.info("All wallets have values, sleep 10s")
+                    time.sleep(10)
+                    continue
+                logger.info(f"Check wallet {none_value_wallet.Address}...")
+                value, msg = check_token_balance(none_value_wallet.Address, endpoint, token_symbol, logger)
+                grist.update(none_value_wallet.id, {"Value": value})  
+                grist.update(none_value_wallet.id, {"Comment": msg})
+            except Exception as e:
+                grist.update(none_value_wallet.id, {"Value": "--"})  
+                logger.error(f"Error occurred: {e}")
+                grist.update(none_value_wallet.id, {"Comment": f"Error: {e}"})
         except Exception as e:
-            logger.error(f"Error occurred: {e}")
+            logger.error(f"Error occurred, sleep 10s: {e}")
             time.sleep(10)
 
 
