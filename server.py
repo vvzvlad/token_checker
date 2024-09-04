@@ -62,9 +62,23 @@ class GRIST:
             record = [row for row in table if row.Name == name]
             return record
 
-    def find_settings(self, setting, table=None):
-        data = self.grist.fetch_table(table or self.settings_table)
-        return [row for row in data if row.Setting == setting][0].Value
+    def find_settings(self, setting):
+        data = getattr(self.fetch_table(self.settings_table)[0], setting)
+        return data
+
+    def find_chain(self, target_id, table):
+        if target_id is None or target_id == "" or int(target_id) == 0:
+            raise Exception("Chain is None!")
+        data = self.grist.fetch_table(table)
+        if len(data) == 0:
+            raise Exception("Chains table is empty!")
+        search_result = [row for row in data if row.id == target_id]
+        if len(search_result) == 0:
+            raise Exception(f"Chain not found!")
+        api = search_result[0].API
+        if api is None or api == "":
+            raise Exception(f"API is None!")
+        return api
 
     def nodes_table_preprocessing(self):
         current_time = self.to_timestamp(datetime.now())
@@ -95,20 +109,20 @@ class GRIST:
                 self.update_column(row.id, "Retries", "0/4")
 
 
-def check_token_balance(address, api_endpoint, token_symbol, logger):
+def check_token_balance(address, api_endpoint, token, logger):
     url = f"{api_endpoint}&module=account&action=tokentx&address={address}"
     try:
         response = requests.get(url)
         data = response.json()
-        if data['status'] == '1':
-            transactions = data['result']
-            for tx in transactions:
-                if tx['tokenSymbol'] == token_symbol:
-                    token_value = int(tx['value']) / (10 ** int(tx['tokenDecimal']))
-                    logger.info(f"Address {address} holds {token_value} {token_symbol}")
+        if data['status'] == '1': 
+            tokens = data['result']
+            for denom in tokens:
+                if denom['tokenSymbol'] == token or denom['tokenName'] == token or denom['contractAddress'].lower() == token.lower():
+                    token_value = int(denom['value']) / (10 ** 18)
+                    logger.info(f"Address {address} holds {token_value} {token}")
                     return token_value, ""
-            logger.error(f"No transactions found for token {token_symbol} at address {address}")
-            return 0, "Token not found"
+            logger.error(f"No tokens found for token {token} at address {address}")
+            return 0, "Tokens not found"
         else:
             if 'message' in data:
                 if data['message'] == 'No transactions found':
@@ -143,30 +157,30 @@ def main():
     server = os.getenv("GRIST_SERVER")
     doc_id = os.getenv("GRIST_DOC_ID")
     api_key = os.getenv("GRIST_API_KEY")
-    nodes_table = os.getenv("GRIST_NODES_TABLE")
-    settings_table = os.getenv("GRIST_SETTINGS_TABLE")
+    nodes_table = "Wallets"
+    settings_table = "Settings"
+    chains_table = "Chains" 
     grist = GRIST(server, doc_id, api_key, nodes_table, settings_table, logger)
     while True:
         try:
-            endpoint = grist.find_settings("Api endpoint")
-            logger.info(f"Endpoint: {endpoint}")
-            token_symbol = grist.find_settings("Token Symbol")
-            logger.info(f"Token Symbol: {token_symbol}")
-            
+            chain = grist.find_settings("Chain")
+            chain_api = grist.find_chain(chain, chains_table)
+            logger.info(f"Chain: {chain}/{chain_api}")
+            token = grist.find_settings("Token")
             try:
                 none_value_wallet = find_none_value(grist)
                 if none_value_wallet is None:
                     logger.info("All wallets have values, sleep 10s")
                     time.sleep(10)
                     continue
-                logger.info(f"Check wallet {none_value_wallet.Address}...")
-                value, msg = check_token_balance(none_value_wallet.Address, endpoint, token_symbol, logger)
-                grist.update(none_value_wallet.id, {"Value": value})  
-                grist.update(none_value_wallet.id, {"Comment": msg})
+                
+                logger.info(f"Check wallet {none_value_wallet.Address}/{chain_api}...")
+                value, msg = check_token_balance(none_value_wallet.Address, chain_api, token, logger)
+                grist.update(none_value_wallet.id, {"Value": value, "Comment": msg})  
             except Exception as e:
-                grist.update(none_value_wallet.id, {"Value": "--"})  
+                #logger.error(f"Fail: {e}\n{traceback.format_exc()}")
+                grist.update(none_value_wallet.id, {"Value": "--", "Comment": f"Error: {e}"})  
                 logger.error(f"Error occurred: {e}")
-                grist.update(none_value_wallet.id, {"Comment": f"Error: {e}"})
         except Exception as e:
             logger.error(f"Error occurred, sleep 10s: {e}")
             time.sleep(10)
