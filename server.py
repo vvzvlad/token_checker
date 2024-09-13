@@ -109,27 +109,43 @@ class GRIST:
                 self.update_column(row.id, "Retries", "0/4")
 
 
-def check_token_balance(address, api_endpoint, token, logger):
-    url = f"{api_endpoint}&module=account&action=tokentx&address={address}"
+def check_balance(address, api_endpoint, token, logger):
+    token_url = f"{api_endpoint}&module=account&action=tokentx&address={address}"
+    eth_url = f"{api_endpoint}&module=account&action=balance&address={address}"
     try:
-        response = requests.get(url)
-        data = response.json()
-        if data['status'] == '1': 
-            tokens = data['result']
-            for denom in tokens:
-                if denom['tokenSymbol'] == token or denom['tokenName'] == token or denom['contractAddress'].lower() == token.lower():
-                    token_value = int(denom['value']) / (10 ** 18)
-                    logger.info(f"Address {address} holds {token_value} {token}")
-                    return token_value, ""
-            logger.error(f"No tokens found for token {token} at address {address}")
-            return 0, "Tokens not found"
+        if token.lower() == 'eth':
+            response = requests.get(eth_url)
+            data = response.json()
+            if data['status'] == '1':
+                eth_value = int(data['result']) / (10 ** 18)
+                logger.info(f"Address {address} holds {eth_value} ETH")
+                return eth_value, ""
+            else:
+                if 'message' in data:
+                    if data['message'] == 'No transactions found':
+                        logger.error(f"No transactions found for address {address}")
+                        return 0, "No transactions found"
+                logger.error(f"Error while checking ETH transactions for address {address}")
+                raise Exception(f"Error while checking ETH transactions for address {address}")
         else:
-            if 'message' in data:
-                if data['message'] == 'No transactions found':
-                    logger.error(f"No transactions found for address {address}")
-                    return 0, "No transactions found"
-            logger.error(f"Error while checking token transactions for address {address}")
-            raise Exception(f"Error while checking token transactions for address {address}")
+            response = requests.get(token_url)
+            data = response.json()
+            if data['status'] == '1': 
+                tokens = data['result']
+                for denom in tokens:
+                    if denom['tokenSymbol'] == token or denom['tokenName'] == token or denom['contractAddress'].lower() == token.lower():
+                        token_value = int(denom['value']) / (10 ** 18)
+                        logger.info(f"Address {address} holds {token_value} {token}")
+                        return token_value, ""
+                logger.error(f"No tokens found for token {token} at address {address}")
+                return 0, "Tokens not found"
+            else:
+                if 'message' in data:
+                    if data['message'] == 'No transactions found':
+                        logger.error(f"No transactions found for address {address}")
+                        return 0, "No transactions found"
+                logger.error(f"Error while checking token transactions for address {address}")
+                raise Exception(f"Error while checking token transactions for address {address}")
     except Exception as e:
         #logger.error(f"Fail: {e}\n{traceback.format_exc()}")
         logger.error(f"Error while checking token transactions for address {address}: {e}")
@@ -175,7 +191,7 @@ def main():
                     continue
                 
                 logger.info(f"Check wallet {none_value_wallet.Address}/{chain_api}...")
-                value, msg = check_token_balance(none_value_wallet.Address, chain_api, token, logger)
+                value, msg = check_balance(none_value_wallet.Address, chain_api, token, logger)
                 grist.update(none_value_wallet.id, {"Value": value, "Comment": msg})  
             except Exception as e:
                 #logger.error(f"Fail: {e}\n{traceback.format_exc()}")
