@@ -110,7 +110,7 @@ class GRIST:
 
 
 def check_balance(address, api_endpoint, token, logger):
-    token_url = f"{api_endpoint}&module=account&action=tokentx&address={address}"
+    token_url = f"{api_endpoint}&module=account&action=tokenbalance&address={address}&contractaddress={token}"
     eth_url = f"{api_endpoint}&module=account&action=balance&address={address}"
     try:
         if token.lower() == 'eth':
@@ -131,14 +131,10 @@ def check_balance(address, api_endpoint, token, logger):
             response = requests.get(token_url)
             data = response.json()
             if data['status'] == '1': 
-                tokens = data['result']
-                for denom in tokens:
-                    if denom['tokenSymbol'] == token or denom['tokenName'] == token or denom['contractAddress'].lower() == token.lower():
-                        token_value = int(denom['value']) / (10 ** 18)
-                        logger.info(f"Address {address} holds {token_value} {token}")
-                        return token_value, ""
-                logger.error(f"No tokens found for token {token} at address {address}")
-                return 0, "Tokens not found"
+                tokens = int(data['result'])
+                logger.info(f"Address {address} holds {tokens} tokens")
+                token_value = tokens / (10 ** 18)
+                return token_value, ""
             else:
                 if 'message' in data:
                     if data['message'] == 'No transactions found':
