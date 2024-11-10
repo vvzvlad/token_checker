@@ -75,10 +75,10 @@ class GRIST:
         search_result = [row for row in data if row.id == target_id]
         if len(search_result) == 0:
             raise Exception(f"Chain not found!")
-        api = search_result[0].API
-        if api is None or api == "":
-            raise Exception(f"API is None!")
-        return api
+        chain_id = search_result[0].Chain_id
+        if chain_id is None or chain_id == "":
+            raise Exception(f"ID is None!")
+        return chain_id
 
     def nodes_table_preprocessing(self):
         current_time = self.to_timestamp(datetime.now())
@@ -109,17 +109,19 @@ class GRIST:
                 self.update_column(row.id, "Retries", "0/4")
 
 
-def check_balance(address, api_endpoint, token, logger):
-    token_url = f"{api_endpoint}&module=account&action=tokenbalance&address={address}&contractaddress={token}"
-    eth_url = f"{api_endpoint}&module=account&action=balance&address={address}"
+def check_balance(address, chain_id, api_key, token, logger):
+    token_url = f"https://api.etherscan.io/v2/api?apikey={api_key}&chainid={chain_id}&module=account&action=tokenbalance&address={address}&contractaddress={token}"
+    eth_url = f"https://api.etherscan.io/v2/api?apikey={api_key}&chainid={chain_id}&module=account&action=balance&address={address}"
+    print(token_url, eth_url)
     try:
         if token.lower() == 'eth':
             response = requests.get(eth_url)
             data = response.json()
             if data['status'] == '1':
                 eth_value = int(data['result']) / (10 ** 18)
-                logger.info(f"Address {address} holds {eth_value} ETH")
-                return eth_value, ""
+                formatted_eth_value = f"{eth_value:.18f}".rstrip('0').rstrip('.')
+                logger.info(f"Address {address} holds {formatted_eth_value} ETH")
+                return formatted_eth_value, ""
             else:
                 if 'message' in data:
                     if data['message'] == 'No transactions found':
@@ -166,18 +168,22 @@ def main():
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    server = os.getenv("GRIST_SERVER")
-    doc_id = os.getenv("GRIST_DOC_ID")
-    api_key = os.getenv("GRIST_API_KEY")
+    grist_server = os.getenv("GRIST_SERVER")
+    grist_doc_id = os.getenv("GRIST_DOC_ID")
+    grist_api_key = os.getenv("GRIST_API_KEY")
+    etherscan_api_key = os.getenv("ETHERSCAN_API_KEY")
+    if grist_server is None or grist_doc_id is None or grist_api_key is None or etherscan_api_key is None:
+        logger.error("Please set GRIST_SERVER, GRIST_DOC_ID, GRIST_API_KEY, ETHERSCAN_API_KEY env variables")
+        sys.exit(1)
     nodes_table = "Wallets"
     settings_table = "Settings"
     chains_table = "Chains" 
-    grist = GRIST(server, doc_id, api_key, nodes_table, settings_table, logger)
+    grist = GRIST(grist_server, grist_doc_id, grist_api_key, nodes_table, settings_table, logger)
     while True:
         try:
             chain = grist.find_settings("Chain")
-            chain_api = grist.find_chain(chain, chains_table)
-            logger.info(f"Chain: {chain}/{chain_api}")
+            chain_id = grist.find_chain(chain, chains_table)
+            logger.info(f"Chain: {chain}/{chain_id}")
             token = grist.find_settings("Token")
             try:
                 none_value_wallet = find_none_value(grist)
@@ -186,8 +192,8 @@ def main():
                     time.sleep(10)
                     continue
                 
-                logger.info(f"Check wallet {none_value_wallet.Address}/{chain_api}...")
-                value, msg = check_balance(none_value_wallet.Address, chain_api, token, logger)
+                logger.info(f"Check wallet {none_value_wallet.Address}/{chain_id}...")
+                value, msg = check_balance(none_value_wallet.Address, chain_id, etherscan_api_key, token, logger)
                 grist.update(none_value_wallet.id, {"Value": value, "Comment": msg})  
             except Exception as e:
                 #logger.error(f"Fail: {e}\n{traceback.format_exc()}")
