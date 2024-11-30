@@ -115,7 +115,7 @@ def check_balance(address, chain_id, api_key, token, logger):
     print(token_url, eth_url)
     try:
         if token.lower() == 'eth':
-            response = requests.get(eth_url)
+            response = requests.get(eth_url, timeout=30)
             data = response.json()
             if data['status'] == '1':
                 eth_value = int(data['result']) / (10 ** 18)
@@ -130,7 +130,7 @@ def check_balance(address, chain_id, api_key, token, logger):
                 logger.error(f"Error while checking ETH transactions for address {address}")
                 raise Exception(f"Error while checking ETH transactions for address {address}")
         else:
-            response = requests.get(token_url)
+            response = requests.get(token_url, timeout=30)
             data = response.json()
             if data['status'] == '1': 
                 tokens = int(data['result'])
