@@ -9,10 +9,41 @@ import os
 import re
 import traceback
 from datetime import datetime, timedelta, timezone
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from grist_api import GristDocAPI
 import colorama
 import requests
+
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    is_healthy = True
+
+    @classmethod
+    def set_health(cls, status: bool):
+        cls.is_healthy = status
+
+    def do_GET(self):
+        if self.path == '/health':
+            if self.is_healthy:
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "healthy"}).encode())
+            else:
+                self.send_response(503)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "unhealthy", "reason": "Request in progress taking too long"}).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+def run_health_server(port):
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
 
 
 class GRIST:
@@ -179,6 +210,12 @@ def main():
     settings_table = "Settings"
     chains_table = "Chains" 
     grist = GRIST(grist_server, grist_doc_id, grist_api_key, nodes_table, settings_table, logger)
+
+    health_port = int(os.getenv('HEALTH_PORT', '8080'))
+    health_thread = threading.Thread(target=run_health_server, args=(health_port,), daemon=True)
+    health_thread.start()
+    logger.info(f"Health check server started on port {health_port}")
+
     while True:
         try:
             chain = grist.find_settings("Chain")
@@ -193,13 +230,16 @@ def main():
                     continue
                 
                 logger.info(f"Check wallet {none_value_wallet.Address}/{chain_id}...")
+                HealthCheckHandler.set_health(False)
                 value, msg = check_balance(none_value_wallet.Address, chain_id, etherscan_api_key, token, logger)
+                HealthCheckHandler.set_health(True)
                 grist.update(none_value_wallet.id, {"Value": value, "Comment": msg})  
             except Exception as e:
-                #logger.error(f"Fail: {e}\n{traceback.format_exc()}")
+                HealthCheckHandler.set_health(True)
                 grist.update(none_value_wallet.id, {"Value": "--", "Comment": f"Error: {e}"})  
                 logger.error(f"Error occurred: {e}")
         except Exception as e:
+            HealthCheckHandler.set_health(True)
             logger.error(f"Error occurred, sleep 10s: {e}")
             time.sleep(10)
 
