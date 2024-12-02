@@ -11,6 +11,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from typing import Optional
 
 from grist_api import GristDocAPI
 import colorama
@@ -46,6 +47,39 @@ def run_health_server(port):
     server.serve_forever()
 
 
+class GristWatchdog:
+    def __init__(self, logger):
+        self._timeout = 300  # 5 minutes in seconds
+        self._lock = threading.Lock()
+        self._running = True
+        self._thread: Optional[threading.Thread] = None
+        self.logger = logger
+        self.reset_timeout()
+        self.logger.info(f"Watchdog initialized with timeout: {self._timeout} seconds")
+        self._thread = threading.Thread(target=self.decrease_timeout_thread, daemon=True)
+        self._thread.start()
+        self.logger.info("Watchdog thread started")
+
+    def reset_timeout(self):
+        with self._lock:
+            previous = self._timeout
+            self._timeout = 300  # Reset to 5 minutes
+            #if previous < 60:  # Логируем только если было меньше минуты
+            self.logger.info(f"Watchdog timeout reset from {previous} to {self._timeout} seconds")
+    
+    def decrease_timeout_thread(self):
+        while self._running:
+            with self._lock:
+                self._timeout = max(0, self._timeout - 10)
+                #if self._timeout < 60:  # Логируем когда осталось меньше минуты
+                self.logger.warning(f"Watchdog timeout decreased: {self._timeout} seconds")
+                if self._timeout < 60:
+                    HealthCheckHandler.set_health(False)
+                if self._timeout < 1:
+                    self.logger.error(f"Watchdog timeout reached. No activity detected for {self._timeout} seconds. Restarting application...")
+                    sys.exit(1)
+            time.sleep(10)
+
 class GRIST:
     def __init__(self, server, doc_id, api_key, nodes_table, settings_table, logger):
         self.server = server
@@ -55,7 +89,6 @@ class GRIST:
         self.settings_table = settings_table.replace(" ", "_")
         self.logger = logger
         self.grist = GristDocAPI(doc_id, server=server, api_key=api_key)
-
 
     def to_timestamp(self, dtime: datetime) -> int:
         if dtime.tzinfo is None:
@@ -209,6 +242,7 @@ def main():
     nodes_table = "Wallets"
     settings_table = "Settings"
     chains_table = "Chains" 
+    watchdog = GristWatchdog(logger)
     grist = GRIST(grist_server, grist_doc_id, grist_api_key, nodes_table, settings_table, logger)
 
     health_port = int(os.getenv('HEALTH_PORT', '8080'))
@@ -218,6 +252,7 @@ def main():
 
     while True:
         try:
+            watchdog.reset_timeout()
             chain = grist.find_settings("Chain")
             chain_id = grist.find_chain(chain, chains_table)
             logger.info(f"Chain: {chain}/{chain_id}")
