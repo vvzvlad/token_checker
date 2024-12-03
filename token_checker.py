@@ -59,13 +59,13 @@ class GristWatchdog:
         self._thread = threading.Thread(target=self.decrease_timeout_thread, daemon=True)
         self._thread.start()
         self.logger.info("Watchdog thread started")
+        self.send_telegram_notification(f"Token checker initialized")
 
-    def send_telegram_notification(self):
+    def send_telegram_notification(self, message):
         try:
             telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
             telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
             if telegram_bot_token and telegram_chat_id:
-                message = f"Watchdog timeout reached. No activity detected for {self._timeout} seconds. Application will be restarted."
                 telegram_url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage"
                 requests.post(telegram_url, json={
                     "chat_id": telegram_chat_id,
@@ -95,7 +95,7 @@ class GristWatchdog:
                     HealthCheckHandler.set_health(False)
                 if self._timeout < 1:
                     self.logger.error(f"Watchdog timeout reached. No activity detected for {self._timeout} seconds. Restarting application...")
-                    self.send_telegram_notification()
+                    self.send_telegram_notification(f"Watchdog timeout reached. No activity detected for {self._timeout} seconds. Application will be restarted.")
                     sys.exit(1)
             time.sleep(10)
     
