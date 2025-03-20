@@ -219,6 +219,7 @@ def check_balance(address, chain_id, api_key, token, logger):
         else:
             response = requests.get(token_url, timeout=30)
             data = response.json()
+            print(data)
             if data['status'] == '1': 
                 tokens = int(data['result'])
                 logger.info(f"Address {address} holds {tokens} tokens")
