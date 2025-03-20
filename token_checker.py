@@ -196,17 +196,20 @@ class GRIST:
                 self.update_column(row.id, "Retries", "0/4")
 
 
-def check_balance(address, chain_id, api_key, token, logger):
+def check_balance(address, chain_id, api_key, token, logger, divider):
     token_url = f"https://api.etherscan.io/v2/api?apikey={api_key}&chainid={chain_id}&module=account&action=tokenbalance&address={address}&contractaddress={token}"
     eth_url = f"https://api.etherscan.io/v2/api?apikey={api_key}&chainid={chain_id}&module=account&action=balance&address={address}"
-    print(token_url, eth_url)
     try:
+        print(eth_url)
         if token.lower() == 'eth':
             response = requests.get(eth_url, timeout=30)
             data = response.json()
             if data['status'] == '1':
-                eth_value = int(data['result']) / (10 ** 18)
-                formatted_eth_value = f"{eth_value:.18f}".rstrip('0').rstrip('.')
+                eth_value = int(data['result']) / (10 ** divider)
+                if divider == 18:
+                    formatted_eth_value = f"{eth_value:.18f}".rstrip('0').rstrip('.')
+                else:
+                    formatted_eth_value = f"{eth_value:.6f}".rstrip('0').rstrip('.')
                 logger.info(f"Address {address} holds {formatted_eth_value} ETH")
                 return formatted_eth_value, ""
             else:
@@ -217,14 +220,19 @@ def check_balance(address, chain_id, api_key, token, logger):
                 logger.error(f"Error while checking ETH transactions for address {address}")
                 raise Exception(f"Error while checking ETH transactions for address {address}")
         else:
+            print(token_url)
             response = requests.get(token_url, timeout=30)
             data = response.json()
-            print(data)
+            #print(data)
             if data['status'] == '1': 
                 tokens = int(data['result'])
                 logger.info(f"Address {address} holds {tokens} tokens")
-                token_value = tokens / (10 ** 18)
-                return token_value, ""
+                token_value = tokens / (10 ** divider)
+                if divider == 18:
+                    formatted_token_value = f"{token_value:.18f}".rstrip('0').rstrip('.')
+                else:
+                    formatted_token_value = f"{token_value:.6f}".rstrip('0').rstrip('.')
+                return formatted_token_value, ""
             else:
                 if 'message' in data:
                     if data['message'] == 'No transactions found':
@@ -281,6 +289,7 @@ def main():
             chain_id = grist.find_chain(chain, chains_table)
             logger.info(f"Chain: {chain}/{chain_id}")
             token = grist.find_settings("Token")
+            divider = grist.find_settings("Divider")
             try:
                 none_value_wallet = find_none_value(grist)
                 if none_value_wallet is None:
@@ -290,7 +299,7 @@ def main():
                 
                 logger.info(f"Check wallet {none_value_wallet.Address}/{chain_id}...")
                 HealthCheckHandler.set_health(False)
-                value, msg = check_balance(none_value_wallet.Address, chain_id, etherscan_api_key, token, logger)
+                value, msg = check_balance(none_value_wallet.Address, chain_id, etherscan_api_key, token, logger, divider)
                 HealthCheckHandler.set_health(True)
                 grist.update(none_value_wallet.id, {"Value": value, "Comment": msg})  
             except Exception as e:
