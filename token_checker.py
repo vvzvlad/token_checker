@@ -196,7 +196,7 @@ class GRIST:
                 self.update_column(row.id, "Retries", "0/4")
 
 
-def check_balance(address, chain_id, api_key, token, logger, divider):
+def check_balance(address, chain_id, api_key, token, logger, divider):    
     token_url = f"https://api.etherscan.io/v2/api?apikey={api_key}&chainid={chain_id}&module=account&action=tokenbalance&address={address}&contractaddress={token}"
     eth_url = f"https://api.etherscan.io/v2/api?apikey={api_key}&chainid={chain_id}&module=account&action=balance&address={address}"
     try:
@@ -290,6 +290,15 @@ def main():
             logger.info(f"Chain: {chain}/{chain_id}")
             token = grist.find_settings("Token")
             divider = grist.find_settings("Divider")
+            
+            # Extract number from divider string
+            if isinstance(divider, str):
+                if "18" in divider: divider = 18
+                elif "6" in divider: divider = 6
+                else:
+                    logger.warning(f"Unknown divider format: {divider}, using default value 18")
+                    divider = 18
+            
             try:
                 none_value_wallet = find_none_value(grist)
                 if none_value_wallet is None:
@@ -314,3 +323,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
