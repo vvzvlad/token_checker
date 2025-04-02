@@ -59,7 +59,7 @@ class GristWatchdog:
         self._thread = threading.Thread(target=self.decrease_timeout_thread, daemon=True)
         self._thread.start()
         self.logger.info("Watchdog thread started")
-        self.send_telegram_notification(f"Token checker initialized")
+        #self.send_telegram_notification(f"Token checker initialized")
 
     def send_telegram_notification(self, message):
         try:
