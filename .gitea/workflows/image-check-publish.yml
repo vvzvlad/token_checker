@@ -1,0 +1,398 @@
+name: Docker Image CI
+
+# No `pull_request` trigger here on purpose. This workflow pushes :latest to the Gitea
+# registry, and :latest is the tag production follows — the `tokenchecker` container in the
+# `crypt-common` stack on nebula carries watchtower labels, so whatever lands on :latest is
+# what gets rolled out once that stack is pointed at this registry (a separate, manual step
+# that is not this workflow's business). A build off a PR branch must never be able to move
+# that tag. PRs are covered by tests.yml, which builds and smoke-tests but never logs in
+# and never pushes.
+#
+# The workflow this replaces — .github/workflows/docker-image.yml, pushing
+# `vvzvlad/token_checker:latest` to Docker Hub — did at least get the trigger right: it
+# only ran on push to main. What it had NO version of at all was a gate. Checkout, buildx,
+# login, `docker/build-push-action` with `push: true`, and that was the entire file: the
+# image was published by the same step that built it, so there was never a moment between
+# "it built" and "it is live" in which anything could be checked.
+#
+# The repository is PUBLIC on both forges (Gitea is canonical, GitHub is a push-mirror).
+# Nothing here depends on that: the push below authenticates with secrets.REGISTRY_TOKEN
+# either way.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+# No `packages: write` here: that scope is GitHub-specific and has no effect on Gitea
+# Actions — the built-in GITEA_TOKEN carries no package scope at all. The registry push
+# below authenticates with the REGISTRY_TOKEN PAT (an organisation-level secret on
+# `projects`, inherited by this repo) instead.
+permissions:
+  contents: read   # checkout
+
+# Two pushes to the same branch in a row must not race: the runs are independent and the
+# older one may finish last, leaving ITS :latest on the registry — the next watchtower
+# poll would then ship the previous commit.
+# The group alone already fixes that: runs are serialised, so the newest commit's :latest
+# is written last. Cancelling is deliberately OFF — it would kill the older run together
+# with its :<sha> image, and on two quick pushes the intermediate commit would never be
+# built, leaving holes in the tag history exactly where a rollback is most likely to be
+# needed.
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # cirunner-hatbox is shared by every repository in the fleet, so a hung step does not
+    # just stall this run — it holds a runner slot that everyone else is queueing for.
+    # Gitea's own default is far too generous for that.
+    # The three step-level timeouts below come to 40 minutes (20 build + 5 smoke + 15
+    # push); 45 leaves 5 on top for checkout, the registry login and the two cleanup steps.
+    # The outer bound has to EXCEED the sum, not equal it: act_runner kills the whole job
+    # when this fires, and a step marked `if: always()` is not guaranteed to run afterwards
+    # — so a job that dies mid-push leaves the smoke container and a ~400 MB image sitting
+    # on the daemon the entire fleet shares.
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Compute image tags
+      id: tags
+      # main -> :latest + :<sha> (production follows :latest); ANY other branch -> :<branch>.
+      # The check is against `main` because that is this repo's default branch — a repo
+      # living on `master` with a `main` check here would build happily and never once
+      # produce the :latest that production actually pulls.
+      # Only main is pushed to by the trigger above, but workflow_dispatch can be fired off
+      # any ref, so the else branch still has to be correct.
+      # Do NOT hardcode a fixed tag in the else branch: a build off a side branch would then
+      # silently overwrite the tag production deploys from — one typo away from shipping
+      # unreviewed code into the `crypt-common` stack.
+      env:
+        # Passed through the environment instead of being interpolated into the script
+        # text: git allows `$`, backticks, quotes and parentheses in branch names, so a
+        # branch like `feat/$(id)` would otherwise execute on the runner, which is
+        # self-hosted and mounts the host's docker socket.
+        REF_NAME: ${{ github.ref_name }}
+        REPO: ${{ github.repository }}
+        SHA: ${{ github.sha }}
+      run: |
+        # Gitea allows uppercase letters in repository names, docker does not accept them
+        # in an image path — a repo like `Token_Checker` would fail the build with
+        # `invalid reference format`, so lowercase it here. Owner and name both come from
+        # $REPO, which makes this `gitea.vvzvlad.xyz/projects/token_checker` and keeps the
+        # file free of a hand-written path that could drift from where the repo lives.
+        IMAGE="gitea.vvzvlad.xyz/$(printf '%s' "$REPO" | tr 'A-Z' 'a-z')"
+        if [ "$REF_NAME" = "main" ]; then
+          # Tag ORDER matters and must not be "tidied up": the push step iterates over
+          # $TAGS left to right, so :latest is pushed LAST and acts as the commit of the
+          # whole publication. If :<sha> fails to push (network, registry quota, disk), the
+          # run stops before :latest moves and production keeps running the previous image.
+          # The reverse order would publish a :latest that watchtower deploys while its
+          # immutable :<sha> twin — the only rollback point — never made it to the
+          # registry.
+          # The Docker Hub workflow this replaces pushed ONLY `vvzvlad/token_checker:latest`,
+          # so no such twin ever existed: every published image overwrote the one before it
+          # and "go back to what ran yesterday" had no answer at all.
+          echo "tags=$IMAGE:$SHA $IMAGE:latest" >> "$GITHUB_OUTPUT"
+          # The smoke gate needs ONE unambiguous tag out of the list above. The :<sha> one
+          # is it — :latest is a moving target shared with whatever ran before, :<sha> can
+          # only ever mean this commit's image.
+          echo "smoke=$IMAGE:$SHA" >> "$GITHUB_OUTPUT"
+        else
+          # Sanitise the branch name into a legal docker tag: everything outside
+          # [A-Za-z0-9_.-] (a `/` in feat/foo above all) becomes `-`, and the result is cut
+          # to 100 chars — branch names have no length limit, docker rejects tags over 128.
+          # The `sed` fixes the first character: docker requires a tag to match
+          # [a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}, so a branch like `-fix`, `(test)` or `+wip`
+          # would otherwise produce a leading `-` and fail the build with
+          # `invalid reference format`.
+          branch_tag=$(printf '%s' "$REF_NAME" | tr -c 'A-Za-z0-9_.-' '-' | sed 's/^[^A-Za-z0-9_]/_/' | cut -c1-100)
+          # The sanitiser passes a name through untouched when it already consists of legal
+          # characters, so a branch literally named `latest` would come out as the
+          # production tag and — one manual workflow_dispatch later — ship unreviewed code
+          # into the stack. The `main` check above does not cover this: the branch is not
+          # `main`, it only borrows its tag.
+          # Reserved names are therefore prefixed instead of being used as-is.
+          if [ "$branch_tag" = "latest" ]; then
+            branch_tag="branch-latest"
+          fi
+          echo "tags=$IMAGE:${branch_tag}" >> "$GITHUB_OUTPUT"
+          echo "smoke=$IMAGE:${branch_tag}" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Build the Docker image
+      # Step-level `timeout-minutes` is the one known to be enforced by Gitea's act_runner;
+      # the job-level one above is only the outer bound. 20 minutes is far above a
+      # realistic cold build: this is `python:3.13` plus a `pip install` of eleven pinned
+      # wheels (requests, grist-api, colorama, proxmoxer, PyYAML, ansible-output-parser and
+      # their dependencies), which comes to roughly 400 MB and a couple of minutes.
+      timeout-minutes: 20
+      env:
+        # Through the environment, not interpolated into the script text: the only thing
+        # standing between a branch name and command execution on the runner is the `tr`
+        # filter in the step above. `$TAGS` below is intentionally unquoted — the tags are
+        # a space-separated list and word splitting is exactly what turns it into loop
+        # items.
+        TAGS: ${{ steps.tags.outputs.tags }}
+      run: |
+        tag_args=""
+        for tag in $TAGS; do tag_args="$tag_args --tag $tag"; done
+        # --pull is required here: unlike GitHub's ephemeral runners, cirunner-hatbox is
+        # self-hosted with a persistent docker daemon, so without the flag the once pulled
+        # python:3.13 would sit in its cache for months and every build would inherit an
+        # unpatched base layer.
+        # Note that this IS a BuildKit build even though no `docker buildx` appears on the
+        # line: BuildKit has been `docker build`'s default since Engine 23.0. It caches
+        # into its own builder store, which is why the cleanup step at the end of this job
+        # cannot reclaim everything — see the caveat there.
+        docker build --pull . --file Dockerfile $tag_args
+
+    - name: Smoke-test the built image
+      # There are no tests in this repo, so this is the only gate before :latest goes live.
+      # It sits BETWEEN build and push on purpose: a red smoke means nothing ever reaches
+      # the registry, so production keeps running the previous image. The Docker Hub
+      # workflow this replaces had nothing in this position at all.
+      #
+      # The container is started with the image's OWN command — no `--entrypoint`, which
+      # does not merely replace the entrypoint but also DROPS the image's CMD. This image
+      # has no ENTRYPOINT at all, only
+      # `CMD while true; do python token_checker.py; sleep 10; done`, so passing one would
+      # make "does the image's command actually run the script" unanswerable — and that is
+      # one of the things ci/smoke.py checks.
+      #
+      # There is deliberately NO readiness loop in this step, unlike the web services in
+      # the fleet. "The container is up" proves nothing here: the shell loop above keeps it
+      # running for ten seconds after every crash, so a running container is entirely
+      # compatible with a script that dies on its first line. The waiting that DOES make
+      # sense — for the health endpoint, and for the script to appear in the container's
+      # process table — lives in ci/smoke.py, in bounded loops that report their own bounds.
+      #
+      # The gate reaches no external API and holds no credential: no Grist, no Etherscan.
+      # The dummy GRIST_SERVER below points at a `.invalid` host, which RFC 2606 reserves
+      # and no resolver can ever answer. A gate that reddens on somebody else's outage is a
+      # gate everybody learns to ignore, and one that needs real keys could not run on a
+      # pull request at all.
+      #
+      # Nothing is published to the host: the checks run from inside the container via
+      # `docker exec`, so parallel runs on this shared daemon cannot collide on a host
+      # port. The container name carries the run id for the same reason.
+      #
+      # Step-level `timeout-minutes`, the one act_runner is known to enforce (the job-level
+      # one is only the outer bound). 5 minutes covers the arithmetic with room to spare:
+      # the missing-env run below is a few seconds, ci/smoke.py's worst case is its
+      # ~20-30 s process-table poll plus a health poll bounded at ~2 min 30 s, and the
+      # docker-health wait at the end of this step adds its own 60 s on top — about
+      # 4 min 20 s in total when everything in it fails slowly. Being killed BY this timeout is
+      # what the margin is for: the `docker logs` below would not run, and the cleanup step
+      # would remove the container, leaving the failure with no diagnostics at all.
+      timeout-minutes: 5
+      env:
+        SMOKE_TAG: ${{ steps.tags.outputs.smoke }}
+        NAME: token-checker-smoke-${{ github.run_id }}
+        SCRIPT_NAME: token_checker.py
+        # The four variables main() requires, with values that are obviously fake and
+        # deliberately unroutable: `.invalid` is reserved by RFC 2606 and can never resolve,
+        # so the container cannot reach a real Grist even by accident, and the two keys are
+        # self-describing nonsense that could not authenticate anywhere.
+        # Passing them is what gets the script past its own guard and into main()'s body,
+        # which is what starts the health server. That is safe precisely because
+        # constructing the Grist client performs NO network I/O — it only builds an object
+        # — so the health thread is listening before anything in the program has tried to
+        # reach anywhere.
+        DUMMY_GRIST_SERVER: http://grist.smoke.invalid
+        DUMMY_GRIST_DOC_ID: smoke-not-a-real-doc-id
+        DUMMY_GRIST_API_KEY: smoke-not-a-real-api-key
+        DUMMY_ETHERSCAN_API_KEY: smoke-not-a-real-api-key
+        # The one token matched in the guard's output. Deliberately just the variable name
+        # and not the whole sentence around it: the wording of a log line is something
+        # somebody will reword one day, the variable name is the contract with the
+        # deployment.
+        GUARD_MARKER: GRIST_SERVER
+      # The body of this step is byte-identical to the one in tests.yml, comments and all.
+      # Only the `env:` values above differ. The PR gate and the publishing gate must run
+      # the same checks against the same kind of container, and the cheapest way to
+      # guarantee that is for the two scripts to be literally the same text — anything else
+      # drifts, and it drifts silently, in the direction of the PR gate testing less.
+      run: |
+        # Self-healing retry: re-running a run from the UI keeps the same run_id, so $NAME
+        # is exactly the name the previous attempt used — and an attempt killed by its
+        # timeout never reaches the `if: always()` cleanup that would have removed the
+        # container. Without this line the retry dies immediately on `docker run` with
+        # "name already in use", and CI stays broken until somebody clears it by hand on
+        # the shared runner host. A no-op on every run that has nothing left behind.
+        docker rm -f "$NAME" || true
+
+        # Check one, and the only one that cannot live inside ci/smoke.py because it needs
+        # `docker run`: the missing-environment guard. main() exits 1 when any of
+        # GRIST_SERVER, GRIST_DOC_ID, GRIST_API_KEY or ETHERSCAN_API_KEY is unset, so a
+        # non-zero exit with NO environment at all proves that the entrypoint really
+        # reaches main() and that the guard still fires — with no credential involved
+        # anywhere.
+        # The image's own CMD is overridden HERE and only here. It is
+        # `while true; do python token_checker.py; sleep 10; done`, a loop that never
+        # exits: a `docker run` that kept it would hang until this step's timeout and could
+        # never observe the script's exit status at all. The ENVIRONMENT, which is what
+        # this check is actually about, is untouched — not one `-e` is passed.
+        guard_status=0
+        guard_output=$(docker run --rm "$SMOKE_TAG" python "$SCRIPT_NAME" 2>&1) || guard_status=$?
+        if [ "$guard_status" -eq 0 ]; then
+          echo "the image exited 0 with no environment at all — the missing-env guard in main() did not fire, so nothing here proves the entrypoint reaches main(), and a deployment with a forgotten variable would sit in its restart loop looking healthy; output:"
+          printf '%s\n' "$guard_output"
+          exit 1
+        fi
+        # A non-zero exit on its own is NOT enough: an ImportError or a SyntaxError exits
+        # non-zero too and would make this check pass for entirely the wrong reason. The
+        # guard's own message is what tells those apart.
+        case "$guard_output" in
+          *"$GUARD_MARKER"*)
+            ;;
+          *)
+            echo "the image exited $guard_status with no environment, but nothing in its output mentions $GUARD_MARKER — that is not the missing-env guard firing, it is the script dying of something else before it got there; output:"
+            printf '%s\n' "$guard_output"
+            exit 1
+            ;;
+        esac
+        echo "ok   the missing-env guard fired: exit $guard_status with no environment, naming $GUARD_MARKER"
+
+        # The container the remaining checks run against, started with the image's own CMD
+        # and with dummy values for the four required variables — see the `env:` block
+        # above for why that is both necessary and safe. HEALTH_PORT is deliberately NOT
+        # set, so the gate exercises main()'s own 8080 default, which is also the port the
+        # Dockerfile's HEALTHCHECK curls.
+        docker run -d --name "$NAME" \
+          -e GRIST_SERVER="$DUMMY_GRIST_SERVER" \
+          -e GRIST_DOC_ID="$DUMMY_GRIST_DOC_ID" \
+          -e GRIST_API_KEY="$DUMMY_GRIST_API_KEY" \
+          -e ETHERSCAN_API_KEY="$DUMMY_ETHERSCAN_API_KEY" \
+          "$SMOKE_TAG"
+
+        # Fed over stdin, so the image does not have to carry the test file and the very
+        # same script can be run by hand against a local container.
+        #
+        # `-u` is not decoration: this stdout is a pipe, and CPython block-buffers those.
+        # A normal exit flushes (SystemExit(1) included, so a self-reported failure is
+        # never lost), but a step killed by the timeout above would take the whole buffer
+        # with it — losing every `ok` line already printed, in exactly the run whose log is
+        # the only thing left to diagnose from.
+        if ! docker exec -i "$NAME" python -u - < ci/smoke.py; then
+          echo "smoke failed; container logs:"
+          docker logs "$NAME"
+          exit 1
+        fi
+
+        # Everything above proves the app ANSWERS on /health — over a python socket, from
+        # inside the container. That is not the probe production acts on. The Dockerfile
+        # declares `HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3`
+        # running `curl -f http://localhost:8080/health`, and the `autoheal` container in
+        # the `crypt-common` stack on nebula restarts `tokenchecker` on THAT verdict. The
+        # two can disagree: a move to a `-slim` base, or a Debian change that drops `curl`
+        # from the image, leaves the endpoint answering perfectly while the healthcheck
+        # fails forever — autoheal then restarts a healthy container roughly every 40s, and
+        # every check above this line stays green throughout. So docker's own verdict has to
+        # be required too, not just the endpoint's.
+        #
+        # The bound below comes from the healthcheck's own parameters rather than from a
+        # taste in round numbers: `--start-period=10s` plus `--retries=3` at
+        # `--interval=10s` means a container that does come up can take 10 + 3*10 = 40s
+        # before its status settles. 30 attempts 2s apart bounds this at 60s — half again as
+        # much slack, which a shared runner under load needs — and still leaves the step
+        # inside its 5-minute timeout with ci/smoke.py's own bounded polls in front of it.
+        #
+        # `docker inspect` must not take the step down with it: on an image that declares no
+        # HEALTHCHECK at all, `.State.Health` is nil and the template errors out, so stderr
+        # is discarded and a non-zero inspect is normalised to the empty string — the same
+        # way guard_status above is captured instead of being left to abort the shell. Empty
+        # is then handled below as its own case, because it means something different.
+        health_status=""
+        attempts=0
+        while [ "$attempts" -lt 30 ]; do
+          health_status=$(docker inspect -f '{{.State.Health.Status}}' "$NAME" 2>/dev/null) || health_status=""
+          if [ "$health_status" = "healthy" ]; then
+            break
+          fi
+          attempts=$((attempts + 1))
+          sleep 2
+        done
+        if [ "$health_status" != "healthy" ]; then
+          if [ -z "$health_status" ]; then
+            # No status at all is NOT "unhealthy" — it is "there is no healthcheck", i.e.
+            # the HEALTHCHECK line has been removed from the Dockerfile. Nothing else in
+            # this gate can see that happen, so it gets its own wording.
+            echo "docker reports no health status for this container at all, which means the image declares no HEALTHCHECK — the line is gone from the Dockerfile. That probe is what the autoheal container in the crypt-common stack on nebula acts on, so with it gone a wedged tokenchecker would never be restarted again, and nothing else in this gate would notice: the /health endpoint answers fine on its own. container logs:"
+          else
+            echo "docker's health status was still '$health_status' after 60s and never reached 'healthy'. The /health endpoint answered fine above, so the app itself is up — what is broken is the Dockerfile's HEALTHCHECK, most likely a curl that is no longer in the image (a -slim base, a Debian change), which makes the probe fail forever. That probe is the one the autoheal container in the crypt-common stack on nebula acts on: it would restart this perfectly healthy container roughly every 40s. container logs:"
+          fi
+          # The probe's OWN output, before the application log. In the scenario this whole
+          # check exists for the app is healthy and the log below is therefore perfectly
+          # clean — the reason lives in .State.Health.Log[].Output, which is where a
+          # `curl: not found` or the probe's exit code actually shows up. Without this the
+          # gate can go red without ever saying why. In the no-HEALTHCHECK branch it prints
+          # nothing, which is itself the confirmation of that diagnosis.
+          docker inspect -f '{{json .State.Health}}' "$NAME" 2>/dev/null || true
+          docker logs "$NAME"
+          exit 1
+        fi
+        echo "ok   docker reports the container healthy: the Dockerfile's HEALTHCHECK, the probe autoheal acts on, really passes inside the image"
+
+    - name: Log in to the Gitea container registry
+      # Deliberately placed here and not at the top of the job: `docker build` runs
+      # arbitrary RUN instructions from the Dockerfile and the smoke step runs the image's
+      # own code, both on a runner whose docker.sock is the host's. Logging in only now
+      # keeps the registry credentials out of the job's docker config for the whole
+      # build-and-test stretch.
+      uses: docker/login-action@v4
+      with:
+        registry: gitea.vvzvlad.xyz
+        username: ${{ github.repository_owner }}
+        # PAT with the `write:package` scope, stored as an organisation secret on
+        # `projects` and inherited here — do not add a repo-level secret of the same name,
+        # it would shadow the org one. The built-in GITEA_TOKEN cannot be used: it carries
+        # no package scope.
+        password: ${{ secrets.REGISTRY_TOKEN }}
+
+    - name: Push Docker images
+      # 15 minutes for a ~400 MB payload on top of the python:3.13 base. That is generous
+      # on a healthy link and meant to be: a bound too tight would abort a push that was
+      # making perfectly good progress, leaving a half-pushed :<sha> and no :latest.
+      timeout-minutes: 15
+      env:
+        # Same reasoning as in the build step: pass the tags through the environment, and
+        # leave `$TAGS` unquoted so it word-splits into items.
+        TAGS: ${{ steps.tags.outputs.tags }}
+      run: |
+        for tag in $TAGS; do docker push "$tag"; done
+
+    - name: Remove the smoke container from the runner
+      # `always()`, and before the image cleanup below: cirunner-hatbox has one persistent
+      # docker daemon shared by every repository, so a container left behind by a failed
+      # run would sit there forever — and would also pin the image, making the `docker rmi`
+      # in the next step fail.
+      # Only the long-lived container needs removing: the missing-env run in the smoke step
+      # is `--rm` and cleans itself up even when it exits non-zero, which is the whole
+      # point of that flag here.
+      if: always()
+      env:
+        NAME: token-checker-smoke-${{ github.run_id }}
+      run: |
+        docker rm -f "$NAME" || true
+
+    - name: Remove the built images from the runner
+      # The runner's docker daemon is persistent, so the images built here would otherwise
+      # pile up and grow the disk forever. This step removes ONLY the tags this run created
+      # — no `docker system prune`, which would also wipe the images of every other repo
+      # sharing the same daemon, including containers other jobs are mid-run against.
+      # It does NOT reclaim everything: `docker rmi <tag>` never touches the BuildKit cache
+      # (that lives in a separate builder store and is only freed by
+      # `docker builder prune`), and `--pull` above leaves the previous base image untagged
+      # as a dangling image whenever upstream publishes a new python:3.13 digest. Both need
+      # a separate periodic cleanup on the runner host.
+      # `always()` so the cleanup runs even when the smoke or the push above fails.
+      if: always()
+      env:
+        # Same reasoning as in the build step: pass the tags through the environment, and
+        # leave `$TAGS` unquoted so it word-splits into items.
+        TAGS: ${{ steps.tags.outputs.tags }}
+      run: |
+        for tag in $TAGS; do docker rmi "$tag" || true; done
