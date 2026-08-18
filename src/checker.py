@@ -76,17 +76,19 @@ def parse_divider(divider, logger):
 def safe_text(error):
     """The text of `error` with every credential this process holds removed.
 
-    Anything that reaches a log line or a Grist cell goes through here. The
-    Etherscan key is the one that actually travels (it is a query parameter of
-    the URL `requests` quotes back in its own exceptions, see `src/redact.py`),
-    but the other two are listed because the rule worth keeping is "no
-    credential value ever leaves the process", not "not this one".
+    Anything that reaches a log line or a Grist cell goes through here. The three
+    values passed are this process's three credentials — the Etherscan key, the
+    Grist key, the Telegram bot token. Only the Etherscan one actually travels
+    from here (it is a query parameter of the URL `requests` quotes back inside
+    its own exceptions, see `src/redact.py`), but the other two are listed
+    because the rule worth keeping is "no credential value ever leaves the
+    process", not "not this one".
 
-    `telegram_chat_id` is in that set on principle and is not a credential at
-    all: it is a short, usually numeric identifier, and blindly replacing one in
-    arbitrary text is how `***` ends up in the middle of a request id or a
-    timestamp. What keeps it harmless is `MIN_SECRET_LENGTH` in `src/redact.py`,
-    below which nothing is replaced.
+    `telegram_chat_id` is deliberately NOT in the set — here or in any other
+    caller. It is the addressee, not a credential: it does not appear in the text
+    of these errors at all, so replacing it hides nothing, while blind replacement
+    of a short numeric identifier is how `***` ends up in the middle of a request
+    id or a timestamp. All cost, no benefit.
     """
     return redact(error, settings.etherscan_api_key, settings.grist_api_key,
                   settings.telegram_bot_token)

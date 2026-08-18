@@ -127,8 +127,8 @@ jobs:
           | docker run --rm -i --pull always --name "$TEST_NAME" \
           -e GRIST_SERVER=http://grist.invalid \
           -e GRIST_DOC_ID=test-doc \
-          -e GRIST_API_KEY=test-key \
-          -e ETHERSCAN_API_KEY=test-etherscan-key \
+          -e GRIST_API_KEY=test-grist-api-key \
+          -e ETHERSCAN_API_KEY=test-etherscan-api-key \
           -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
           -e PYTHONDONTWRITEBYTECODE=1 \
           "$RUNTIME_IMAGE" \

@@ -8,14 +8,17 @@ discovered in production.
 """
 
 import pytest
+from conftest import long_enough
 
 from src.redact import MIN_SECRET_LENGTH, PLACEHOLDER, redact
 
-# Long enough to be replaced at all — see the boundary test at the bottom. Every
-# secret in this file is at least MIN_SECRET_LENGTH characters, because the real
-# ones are 32 and up and a placeholder shorter than the guard would make these
-# tests pass for a reason that has nothing to do with what they check.
-SECRET = "SECRET-api-key"
+# Long enough to be replaced at all — see the boundary test at the bottom. A
+# stand-in shorter than the guard would make every test using it pass because
+# nothing was replaced, which is not what any of them is checking, so the length
+# is DERIVED from the constant rather than written at a value that clears it
+# today. (The tests further down that deliberately go under the guard are about
+# the guard itself and stay literal.)
+SECRET = long_enough("SECRET-api-key")
 
 
 def test_a_secret_is_replaced_wherever_it_appears():
@@ -70,12 +73,17 @@ def test_no_secrets_at_all_is_a_plain_stringification():
 def test_a_value_below_the_minimum_length_is_left_in_place(length, replaced):
     """The boundary itself, from both sides.
 
-    Replacement is blind, so a short value matches text that is not the secret:
-    `TELEGRAM_CHAT_ID` is passed to `redact()` by both callers and is a short,
-    usually numeric identifier, and a four-character one would put `***` into
-    timestamps, hex addresses and ordinary words in every message the service
-    writes. Nothing that actually has to be hidden here is that short — the API
-    keys are 32 characters and the bot token over 40.
+    Replacement is blind — every occurrence of the value, anywhere in the text —
+    so a value short enough to occur by coincidence puts `***` into timestamps,
+    hex addresses and ordinary words instead of over a secret, damaging the
+    message without hiding anything. That is what the guard refuses to do, and it
+    refuses on LENGTH alone, knowing nothing about which variable it was handed.
+
+    The other side of the same trade is that a credential below the line would be
+    left in the text in full, so the constant is not allowed to be a lone
+    convention: `src/settings.py` imports it as the `min_length` of its `Secret`
+    alias, and `tests/test_settings.py` pins that a shorter credential is refused
+    at startup.
     """
     secret = "x" * length
     text = "value={} end".format(secret)
@@ -84,10 +92,16 @@ def test_a_value_below_the_minimum_length_is_left_in_place(length, replaced):
     assert (PLACEHOLDER in result) is replaced
 
 
-def test_a_short_chat_id_does_not_pepper_the_message_with_placeholders():
-    # The case the guard exists for, in the shape it arrives in: `safe_text()` in
-    # src/checker.py passes TELEGRAM_CHAT_ID as its third secret, and a short
-    # numeric id is a SUBSTRING of digits that occur naturally in an error message
-    # — here it would cut the request id in half and leave "***678".
+def test_a_short_value_would_have_been_cut_out_of_text_that_is_not_the_secret():
+    # What the guard actually protects, in the shape the damage takes: a short run
+    # of characters is a SUBSTRING of things that occur naturally in an error
+    # message. Here the "secret" sits inside a request id that has nothing to do
+    # with it, and replacing it would leave the operator reading "***678" — the id
+    # destroyed, and nothing hidden, because the value was never in this text as a
+    # secret in the first place.
+    #
+    # No caller passes anything this short today, and that is the point of the
+    # guard rather than an argument against it: it is what makes `redact()` safe
+    # to hand a value without first proving where that value can appear.
     text = "HTTP 500 for request 12345678, retries exceeded with url: /v2/api"
     assert redact(text, "12345") == text

@@ -23,17 +23,26 @@ PLACEHOLDER = "***"
 
 # Values shorter than this are NOT replaced. Replacement here is blind — every
 # occurrence of the value anywhere in the text, with no notion of where a
-# credential would plausibly sit — so a short value matches text that is not the
-# secret at all: a timestamp, an exit code, a hex address, an ordinary word. Both
-# callers pass `TELEGRAM_CHAT_ID` through here and that one is not a credential
-# but a short, usually numeric identifier; a four-character chat id would put
-# `***` in arbitrary places in every message the service writes.
+# credential would plausibly sit — so a short, non-random value matches text that
+# is not the secret at all: a timestamp, an exit code, a slice of a hex address,
+# an ordinary word. Replacing those hides nothing and damages the message, which
+# is the only reason anybody is reading the line. The guard is drawn around that
+# SHAPE and around nothing else: it refuses to blind-replace anything short enough
+# to turn up in the text by coincidence, whatever variable it was handed. Only
+# credentials are ever passed in — an addressee like `TELEGRAM_CHAT_ID` is not
+# handed to `redact()` anywhere, precisely because replacing it could only cost.
 #
-# Nothing this service actually has to hide is that short: the Etherscan and
-# Grist API keys are 32 characters, a Telegram bot token is over 40. The
-# trade-off is stated rather than implied, because it IS one — a credential
-# shorter than this would be left in the text — and a value that short cannot be
-# redacted without destroying the message it is being redacted out of.
+# The trade-off is stated rather than implied, because it IS one — a credential
+# shorter than this WOULD be left in the text, silently, and a value that short
+# cannot be redacted without destroying the message it is being redacted out of.
+# That is why the floor is not left as a convention: `src/settings.py` imports
+# this constant as the `min_length` of its `Secret` alias — and of the
+# `OptionalSecret` one, which is the same floor for a credential that is allowed
+# to be absent — so a credential too short to redact fails validation at startup
+# instead of travelling out in the clear for the life of the deployment. Whether
+# the keys currently configured clear the floor is deliberately written down
+# NOWHERE in this repository: the alias is the whole of the claim, it is checked
+# on every start, and it holds for whatever key is configured next.
 MIN_SECRET_LENGTH = 8
 
 

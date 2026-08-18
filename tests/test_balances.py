@@ -10,9 +10,17 @@ import traceback
 
 import pytest
 import requests
+from conftest import long_enough
 
 import src.balances
 from src.balances import check_balance, find_none_value
+
+# The stand-in for ETHERSCAN_API_KEY in the redaction tests below. Padded from
+# `MIN_SECRET_LENGTH` via the conftest helper, because `redact()` leaves anything
+# under that floor alone: a shorter stand-in would let those tests pass by having
+# nothing replaced, which is the opposite of what they check. Deriving it is what
+# keeps that true after somebody raises the constant.
+API_KEY = long_enough("super-secret-key")
 
 
 class FakeResponse:
@@ -20,6 +28,12 @@ class FakeResponse:
         self._payload = payload
 
     def json(self):
+        # An exception AS the payload is how a test spells a body that is not JSON
+        # at all — a proxy's own page, an error page from whatever sits in front of
+        # the API. That arrives in the code as `response.json()` raising, not as a
+        # value, so it has to arrive here the same way.
+        if isinstance(self._payload, Exception):
+            raise self._payload
         return self._payload
 
 
@@ -160,6 +174,95 @@ def test_any_other_non_success_status_raises(etherscan, logger, token):
     # The message ends up in the wallet's Comment cell, so it has to name the
     # address it is about.
     assert "0xabc" in str(excinfo.value)
+    # ...and what Etherscan actually said. "NOTOK" is the status; `result` is the
+    # half that tells the operator whether to fix a key or wait out a rate limit.
+    assert "Invalid API Key" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("token,ran,other", [
+    ("eth", "ETH", "token"),
+    ("ETH", "ETH", "token"),
+    ("0xtoken", "token", "ETH"),
+])
+def test_the_message_names_the_branch_that_actually_ran(etherscan, logger, token, ran, other):
+    """One branch, named once, in the cell and in the log.
+
+    The wrapper used to say "token" on BOTH branches while the inner raise said
+    "ETH", so an ETH failure reached the wallet's `Comment` cell as two sentences
+    contradicting each other — "Error while checking token transactions for
+    address 0x...: Exception: Error while checking ETH transactions for address
+    0x...". Nothing downstream could settle it either: `from None` suppresses the
+    context, so the chain that named the real branch is gone by the time anybody
+    reads the cell.
+    """
+    etherscan({"status": "0", "message": "NOTOK", "result": "Invalid API Key"})
+    with pytest.raises(Exception) as excinfo:
+        check_balance("0xabc", 1, "k", token, logger, 18)
+
+    message = str(excinfo.value)
+    assert "checking {} transactions".format(ran) in message
+    assert "checking {} transactions".format(other) not in message
+    # The log is the other destination and gets the same single statement.
+    assert any("checking {} transactions".format(ran) in logged
+               for logged in logger.error_messages)
+    assert not any("checking {} transactions".format(other) in logged
+                   for logged in logger.error_messages)
+    # And the class name in the middle carries meaning rather than saying
+    # "Exception:" — this failure is an answer that said no, not a lost
+    # connection and not a payload in an unexpected shape.
+    assert "EtherscanError" in message
+
+
+def test_the_branch_is_named_token_when_the_branch_was_never_chosen(logger):
+    # `token.lower()` on a Grist `Token` cell that is not a string fails BEFORE
+    # either branch is picked — and it is the first statement in `check_balance`
+    # that can raise at all, which is what `subject`'s binding has to stay ahead
+    # of. (Not "ahead of the `try`": moved to the first line inside it, the
+    # binding would still be ahead of every raising statement and this test would
+    # still be green. Above the block is simply the position a later edit cannot
+    # push a raise in front of.)
+    #
+    # The handler still has to name something here, and it must not be a NameError
+    # — that replaces the real failure with a second one about the code reporting
+    # it, in the cell the operator is sent to read.
+    with pytest.raises(Exception) as excinfo:
+        check_balance("0xabc", 1, "k", None, logger, 18)
+    assert "checking token transactions for address 0xabc" in str(excinfo.value)
+    assert "AttributeError" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("payload,expected_class", [
+    # A JSON list where an object was expected — `data['status']` on a list.
+    ([], "TypeError"),
+    # An answer that says success and then hands back something that is not a
+    # number, so `int()` is what fails.
+    ({"status": "1", "result": "not-a-number"}, "ValueError"),
+    # A body that never was JSON: a proxy page, a CDN error page.
+    (requests.exceptions.JSONDecodeError("Expecting value", "<html>", 0), "JSONDecodeError"),
+])
+def test_the_set_of_failures_reaching_the_comment_cell_is_open(etherscan, logger,
+                                                               payload, expected_class):
+    """Why `EtherscanError` is a type of its own, and why its docstring lists no total.
+
+    The handler at the bottom of `check_balance` catches `Exception`, so what
+    reaches it is open-ended: these three, plus the `KeyError` and `AttributeError`
+    pinned by their own tests above, plus the transport family, plus whatever the
+    next shape of a bad answer turns out to be. Anything that counts them is wrong
+    the next time the API changes.
+
+    All of it arrives at the operator as ONE line in a spreadsheet cell, which is
+    why the class name is put in front of the text: it is the entire
+    classification the reader gets. That is also the argument for
+    `EtherscanError` — "the answer said no" needs a word of its own among these,
+    and "Exception:" would be a word that distinguishes nothing.
+    """
+    etherscan(payload)
+    with pytest.raises(Exception) as excinfo:
+        check_balance("0xabc", 1, "k", "0xtoken", logger, 18)
+    message = str(excinfo.value)
+    assert expected_class in message
+    # And the wallet is still named — the cell has to say what it is about.
+    assert "0xabc" in message
 
 
 def test_a_malformed_payload_raises_rather_than_writing_a_wrong_number(etherscan, logger):
@@ -187,11 +290,11 @@ def test_the_api_key_never_reaches_stdout(etherscan, logger, capsys):
     # happy path only — and the happy path was never where the key escaped after
     # the print() was removed. The test below is the one about the real leak.
     etherscan({"status": "1", "result": "1000000000000000000"})
-    check_balance("0xabc", 1, "super-secret-key", "eth", logger, 18)
+    check_balance("0xabc", 1, API_KEY, "eth", logger, 18)
     captured = capsys.readouterr()
-    assert "super-secret-key" not in captured.out
-    assert "super-secret-key" not in captured.err
-    assert not any("super-secret-key" in message
+    assert API_KEY not in captured.out
+    assert API_KEY not in captured.err
+    assert not any(API_KEY in message
                    for message in logger.info_messages + logger.error_messages)
 
 
@@ -218,10 +321,10 @@ def test_a_network_error_does_not_carry_the_api_key_out_of_here(monkeypatch, log
     monkeypatch.setattr(src.balances.requests, "get", exploding_get)
 
     with pytest.raises(Exception) as excinfo:
-        check_balance("0xabc", 1, "super-secret-key", token, logger, 18)
+        check_balance("0xabc", 1, API_KEY, token, logger, 18)
 
-    assert "super-secret-key" not in str(excinfo.value)
-    assert not any("super-secret-key" in message
+    assert API_KEY not in str(excinfo.value)
+    assert not any(API_KEY in message
                    for message in logger.info_messages + logger.error_messages)
     # Redacted, not swallowed: the operator still has to be able to tell a proxy
     # failure from a wrong answer, and the wallet has to be named.
@@ -249,7 +352,7 @@ def test_the_unredacted_original_is_not_left_chained_to_what_is_raised(monkeypat
     # the call line below would appear in the render on its own account and fail
     # this test no matter what the code does. Production has no such literal —
     # the key arrives from `settings.etherscan_api_key`.
-    key = "super-secret-key"
+    key = API_KEY
 
     def exploding_get(url, timeout=None):
         raise requests.exceptions.ConnectionError(

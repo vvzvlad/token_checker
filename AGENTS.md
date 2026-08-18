@@ -205,6 +205,42 @@ constant with what the run produced.
   text of any transport error — so `f"...: {e}"` leaks the key even where no URL is logged.
   Put it through `redact()` from `src/redact.py` first; that goes for `docker logs` and, more
   so, for anything written into a Grist cell.
+- `redact()` **silently leaves values shorter than `MIN_SECRET_LENGTH` in place.** Replacement
+  is blind — every occurrence anywhere in the text — so a short, non-random value would match
+  timestamps, exit codes and ordinary words rather than the secret, damaging the message
+  without hiding anything. It is a floor on what can safely be blind-replaced, not a promise
+  about a particular variable. What closes the gap that leaves is `src/settings.py`: its
+  `Secret` alias takes its `min_length` **from that same constant**, so a credential too short
+  to redact fails at startup instead of travelling out unredacted for the life of the
+  deployment. **A new credential goes on `Secret` — or, when it may legitimately be absent, on
+  `OptionalSecret` — never on `Required` or `Stripped`**, both of which accept it at any length
+  while the redaction quietly declines to cover it. All three credentials this process holds
+  (`GRIST_API_KEY`, `ETHERSCAN_API_KEY`, `TELEGRAM_BOT_TOKEN` — the set `safe_text()` in
+  `src/checker.py` passes to `redact()`) sit on one of the two.
+  `OptionalSecret` is `Secret` plus a before-validator that turns an empty or whitespace-only
+  value into `None`, and that ordering is what makes an optional credential able to carry the
+  floor at all: `TELEGRAM_BOT_TOKEN=` left in the stack's `environment:` block still means "not
+  configured" and still starts the container, while a value somebody actually set is held to
+  the floor. Do not "simplify" that validator away in favour of dropping the floor — the state
+  it buys back is an eight-character bot token accepted at startup and then quoted into
+  `docker logs` in full by `raise_for_status()`, which builds its message out of the URL the
+  token is a path segment of.
+  Do not put the non-secret `GRIST_SERVER` / `GRIST_DOC_ID` on `Secret`, or `TELEGRAM_CHAT_ID`
+  on `OptionalSecret`: none of them is ever handed to `redact()` and all may legitimately be
+  short. Do not hand a non-credential (an addressee, an id) to `redact()` at all — there is
+  nothing to hide and the replacement can only corrupt the text.
+  Nowhere in this repository is the length of a real key written down; the alias is the whole
+  of the claim.
+- A `raise` that wraps a **redacted** exception must carry `from None`. Inside an `except`
+  python attaches the original — unredacted — exception as `__context__`, and
+  `traceback.format_exc()`, `logger.error(..., exc_info=True)` and an unhandled exit to
+  stderr all render the whole chain, so the credential leaves anyway while `str(e)` looks
+  clean. Suppressing the context costs nothing when the wrapper already names the class and
+  the redacted text. Two worked examples, each with its regression test: the handler in
+  `src/balances.py`, and the `SystemExit` in `src/config_errors.py` — the latter because
+  pydantic renders every rejected field as `input_value=<the value as it arrived>`, i.e. the
+  raw credential, and a `SystemExit` printing no traceback today is not the same as one that
+  never will.
 - Code comments and log messages are in English.
 - All repeated actions go through `make` targets — add or extend a target instead of running
   ad-hoc commands.
