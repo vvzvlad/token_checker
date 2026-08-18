@@ -1,11 +1,54 @@
-ansible-output-parser==0.1.0
+# Runtime dependencies of the image, pinned with `==` down to the transitive
+# names: two builds of the same commit have to produce the same image, and a
+# floating transitive dep is a build that breaks with no commit to blame it on.
+# Every line says what BREAKS without it, not what the package is.
+#
+# Verified to resolve as prebuilt wheels for the image's interpreter (python:3.13,
+# so cp313 tags) — no local compilation of pydantic-core's Rust extension:
+#   pip install --only-binary=:all: -r requirements.txt
+#
+# Three entries that used to sit here are GONE: `ansible-output-parser`,
+# `proxmoxer` and `PyYAML`. They arrived by copy-paste from a sibling project and
+# nothing in this repository imports any of them (grep says so). Their only
+# effects were a bigger image and a bigger surface to keep pinned.
+
+# `src/grist.py` does `from grist_api import GristDocAPI` — the whole Grist side
+# of this service is that one client. Note that it calls requests WITHOUT a
+# timeout, which is why src/http_timeout.py exists.
+grist-api==0.1.0
+# grist_api's own dependency, and one of the few packages that genuinely needs
+# naming: its absence is an ImportError inside grist_api at startup.
+future==1.0.0
+
+# `src/balances.py` and `src/watchdog.py` call requests directly — no Etherscan
+# lookup and no Telegram notification without it.
+requests==2.32.3
+# requests' own dependency closure, pinned like everything else here. Missing any
+# of them is an ImportError inside requests, i.e. nothing works at all; a floating
+# one is a silent change to TLS trust (certifi) or to header decoding.
 certifi==2024.7.4
 charset-normalizer==3.3.2
-colorama==0.4.6
-future==1.0.0
-grist-api==0.1.0
 idna==3.8
-proxmoxer==2.1.0
-PyYAML==6.0.2
-requests==2.32.3
 urllib3==2.2.2
+
+# `src/checker.py` calls colorama.init(); without it the import fails and the
+# loop never starts.
+colorama==0.4.6
+
+# Single configuration entry point (src/settings.py). Without it every module
+# that imports src.settings fails, which is all of them.
+pydantic-settings==2.7.0
+# pydantic-settings' own dependency closure, pinned for the same reason as
+# requests' above: a future pydantic release incompatible with
+# pydantic-settings 2.7.0 would otherwise break the build on a commit that
+# changed nothing near it.
+pydantic==2.13.4
+pydantic-core==2.46.4
+annotated-types==0.7.0
+typing-extensions==4.16.0
+typing-inspection==0.4.2
+# Reads `.env` for pydantic-settings' env_file support. Not needed in production
+# (the crypt-common stack passes real environment variables), but without it
+# `SettingsConfigDict(env_file=".env")` silently stops reading the file every
+# local run depends on.
+python-dotenv==1.1.1
