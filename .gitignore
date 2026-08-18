@@ -1,1 +1,11 @@
+.env
 /.venv
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/*
+!data/.gitkeep
+# Claude Code agent worktrees — never commit
+.claude/worktrees/
