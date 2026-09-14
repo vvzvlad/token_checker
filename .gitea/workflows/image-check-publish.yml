@@ -73,10 +73,11 @@ jobs:
       # build uses makes "the tests ran" and "docker works on this runner" the same statement.
       timeout-minutes: 20
       env:
-        # The same interpreter version the Dockerfile ships. Testing under a different python
+        # The same base the Dockerfile ships, tag for tag. Testing under a different python
         # than the one that runs in production is exactly the gap this arrangement closes:
-        # a suite that is green on one python and an image that runs another. `-slim` rather
-        # than the full base only because nothing in the suite needs curl or the build tools.
+        # a suite that is green on one python and an image that runs another. The image used
+        # to be built on the full python:3.13 while this job already ran on -slim; since the
+        # Dockerfile moved to -slim too, the two are literally the same base.
         RUNTIME_IMAGE: python:3.13-slim
       # The `run:` body of this step is byte-identical to the one in tests.yml.
       # The PR job and the publishing job must run the same suite the same way, and the
@@ -157,7 +158,7 @@ jobs:
     # push); 60 leaves 5 on top for checkout, the registry login and the two cleanup steps.
     # The outer bound has to EXCEED the sum, not equal it: act_runner kills the whole job
     # when this fires, and a step marked `if: always()` is not guaranteed to run afterwards
-    # — so a job that dies mid-push leaves the smoke container and a ~400 MB image sitting
+    # — so a job that dies mid-push leaves the smoke container and a 167 MB image sitting
     # on the daemon the entire fleet shares.
     timeout-minutes: 60
     # Job-level, so the smoke step that CREATES these containers and the cleanup step that
@@ -235,10 +236,11 @@ jobs:
     - name: Build the Docker image
       # Step-level `timeout-minutes` is the one known to be enforced by Gitea's act_runner;
       # the job-level one above is only the outer bound. 20 minutes is far above a
-      # realistic cold build: this is `python:3.13`, one `apt-get install gosu` and a
-      # `pip install` of the pinned wheels in requirements.txt — pure-python ones plus
+      # realistic cold build: this is `python:3.13-slim`, one `apt-get install gosu curl`
+      # and a `pip install` of the pinned wheels in requirements.txt — pure-python ones plus
       # pydantic-core, which ships a cp313 manylinux wheel and is not compiled here. The
-      # bulk of the image is the non-slim python:3.13 base.
+      # bulk of the image is still the base, but -slim is where the old 1.14 GB went: the
+      # full image carries a 656 MB build-toolchain layer that nothing here ever uses.
       timeout-minutes: 20
       env:
         # Through the environment, not interpolated into the script text: the only thing
@@ -252,7 +254,7 @@ jobs:
         for tag in $TAGS; do tag_args="$tag_args --tag $tag"; done
         # --pull is required here: unlike GitHub's ephemeral runners, cirunner-hatbox is
         # self-hosted with a persistent docker daemon, so without the flag the once pulled
-        # python:3.13 would sit in its cache for months and every build would inherit an
+        # python:3.13-slim would sit in its cache for months and every build would inherit an
         # unpatched base layer.
         # Note that this IS a BuildKit build even though no `docker buildx` appears on the
         # line: BuildKit has been `docker build`'s default since Engine 23.0. It caches
@@ -324,7 +326,9 @@ jobs:
         password: ${{ secrets.REGISTRY_TOKEN }}
 
     - name: Push Docker images
-      # 15 minutes for a ~400 MB payload on top of the python:3.13 base. That is generous
+      # 15 minutes for a 167 MB image — gitea.vvzvlad.xyz holds no python:3.13-slim layers
+      # of its own, so the base travels too the first time each digest is seen, and the
+      # whole thing is still 7x smaller than it was on the full base. That is generous
       # on a healthy link and meant to be: a bound too tight would abort a push that was
       # making perfectly good progress, leaving a half-pushed :<sha> and no :latest.
       timeout-minutes: 15
@@ -367,7 +371,7 @@ jobs:
       # It does NOT reclaim everything: `docker rmi <tag>` never touches the BuildKit cache
       # (that lives in a separate builder store and is only freed by
       # `docker builder prune`), and `--pull` above leaves the previous base image untagged
-      # as a dangling image whenever upstream publishes a new python:3.13 digest. Both need
+      # as a dangling image whenever upstream publishes a new python:3.13-slim digest. Both need
       # a separate periodic cleanup on the runner host.
       # `always()` so the cleanup runs even when the smoke or the push above fails.
       if: always()
