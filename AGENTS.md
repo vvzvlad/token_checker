@@ -92,9 +92,10 @@ good image starts getting rolled back.
 
 The endpoint and the probe can disagree, and that is why `ci/smoke.py` checks both
 separately: the endpoint is answered by python over a socket, the probe shells out to
-`curl`. Move to a `-slim` base and `curl` disappears — the endpoint answers perfectly while
-docker calls the container unhealthy forever, auto-heal restarts it every ~40 s and every
-other check stays green.
+`curl`. The base is `python:3.13-slim`, which does not ship `curl` — it is installed
+explicitly next to `gosu` in the Dockerfile's apt layer. Drop it from that line and the
+endpoint answers perfectly while docker calls the container unhealthy forever, auto-heal
+restarts it every ~40 s and every other check stays green.
 
 ### The watchdog calls `os._exit`, and that is deliberate
 `src/watchdog.py` counts down from 300 s and the main loop resets it every iteration. When

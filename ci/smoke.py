@@ -40,8 +40,9 @@ packaged the way this repo says it is. Every check below is one of those:
 * (g) the /health endpoint answers `healthy` from inside the container;
 * (h) DOCKER's own health verdict reaches `healthy`. This is a DIFFERENT check from (g) and
   the difference is the whole point: (g) speaks python to a socket, while the Dockerfile's
-  HEALTHCHECK shells out to `curl`. Drop `curl` from the image — a move to a `-slim` base,
-  a Debian change — and the endpoint answers perfectly while the probe fails forever. Our
+  HEALTHCHECK shells out to `curl`. The base is `-slim` and does not ship `curl`, so it is
+  one explicit `apt-get install` line — tidy that line up, or lose the package to a Debian
+  change, and the endpoint answers perfectly while the probe fails forever. Our
   Portainer build's auto-heal then restarts a healthy container every ~40 s, and auto-update
   rolls back every good image for never reaching `healthy` in its window, with every other
   check in this file still green.
@@ -889,9 +890,10 @@ def check_docker_health(name, blocked=None):
     """(h) DOCKER's own verdict on the container reaches `healthy`.
 
     A DIFFERENT check from (g), and the difference is the point: (g) speaks python to a
-    socket while the Dockerfile's HEALTHCHECK shells out to `curl`. Lose `curl` — a `-slim`
-    base, a Debian change — and the endpoint answers perfectly while the probe fails
-    forever. This is the verdict our Portainer build acts on in both directions: auto-heal
+    socket while the Dockerfile's HEALTHCHECK shells out to `curl`. The `-slim` base does
+    not ship `curl`, so it is one explicit `apt-get install` line — lose it to a tidy-up or
+    to a Debian change and the endpoint answers perfectly while the probe fails forever.
+    This is the verdict our Portainer build acts on in both directions: auto-heal
     restarts a container docker calls `unhealthy`, and auto-update waits for `healthy` after
     it recreates one before accepting the new image instead of rolling it back.
     """

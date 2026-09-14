@@ -1,10 +1,16 @@
-# python:3.13 is kept deliberately. Moving to another base — a `-slim` one above
-# all — is a separate decision with its own testing, and this refactor does not
-# carry it. Note this is the FULL image, not -slim, so `curl` (which the
-# HEALTHCHECK below runs) is already present and no extra apt package is needed
-# for it. A move to -slim would leave the /health endpoint answering perfectly
-# while docker's probe failed forever — see ci/smoke.py, which checks both.
-FROM python:3.13
+# python:3.13-slim. The full image put this at 1.14 GB, of which the service is
+# 28 MB: the rest is base layers, and a single 656 MB one is the build toolchain
+# (gcc, make, *-dev) that the official image needs once to compile CPython and
+# that is dead weight at runtime. Nothing here compiles — every requirement
+# installs from a wheel — so -slim costs nothing in build time.
+#
+# What -slim does cost is `curl`, which the HEALTHCHECK below runs against the
+# /health endpoint. It is therefore installed explicitly in the apt layer next to
+# gosu. Do NOT drop that install: without curl the endpoint keeps answering
+# perfectly while docker's probe fails forever, and a failing probe is not a
+# cosmetic problem here — Portainer's auto-heal restarts on it and its
+# auto-update rolls a new image back over it. ci/smoke.py checks both paths.
+FROM python:3.13-slim
 
 WORKDIR /app
 
@@ -17,8 +23,9 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
 # gosu is used by the entrypoint to drop privileges from root to the app user.
+# curl is used by the HEALTHCHECK; the full python image shipped it, -slim does not.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gosu \
+    && apt-get install -y --no-install-recommends gosu curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Fixed uid keeps volume ownership stable across image rebuilds.
