@@ -1,0 +1,53 @@
+# Deploy REFERENCE. The real deployment is the `tokenchecker` service inside the
+# multi-service `crypt-common` stack on nebula, managed through Portainer — this file
+# documents what that service looks like on its own, and is what you would use to run
+# the image standalone. Values below are PLACEHOLDERS (XXX), not real secrets.
+#
+# No Traefik and no published port: the only thing listening is the local /health
+# endpoint, which exists for docker's own probe and is not meant to be reachable from
+# outside the container. Hence no `networks` block either.
+#
+# No volume: the service keeps no state of its own — the wallets live in the Grist
+# document, so there is nothing under /app/data to persist.
+
+services:
+  token_checker:
+    image: gitea.vvzvlad.xyz/projects/token_checker:latest
+    # NOTE: production runs this container as `tokenchecker`, without the underscore, so
+    # that is the name kept here. It predates the one-name-everywhere convention and
+    # renaming it is a production change, not a repository one.
+    container_name: tokenchecker
+    # `unless-stopped`, and it is load-bearing since the image stopped wrapping the
+    # script in a `while true` loop: a container whose configuration is broken now dies
+    # visibly, and this is what restarts it.
+    restart: unless-stopped
+    # The app runs as non-root `app` (uid 1000): the entrypoint starts as root, chowns
+    # /app/data and drops privileges via gosu. A `user:` override here makes the
+    # entrypoint skip the chown — the volume must then already be owned by that uid.
+    security_opt:
+      - no-new-privileges:true   # forbids privilege escalation via setuid binaries; gosu only drops privileges
+    environment:
+      GRIST_SERVER: XXX
+      GRIST_DOC_ID: XXX
+      GRIST_API_KEY: XXX
+      ETHERSCAN_API_KEY: XXX
+      TZ: Europe/Moscow
+      # Both or neither: with only one of them the watchdog logs "notification skipped"
+      # and dies quietly, which is a supported configuration.
+      # TELEGRAM_BOT_TOKEN: XXX
+      # TELEGRAM_CHAT_ID: XXX
+      # The default below is a production contract: the stack does not pass this
+      # variable and the image's HEALTHCHECK curls the same default. Override it only if
+      # you also know what the healthcheck will then probe.
+      # HEALTH_PORT: 8080
+    logging:
+      driver: "json-file"
+      options:
+        max-file: 5
+        max-size: 10m
+    labels:
+      # The canonical pair, and what production actually carries. Auto-update pulls a
+      # new :latest; auto-heal restarts the container when docker reports it unhealthy —
+      # i.e. when the /health endpoint stops answering 200.
+      io.portainer.update.enable: "true"
+      io.portainer.autoheal.enable: "true"
