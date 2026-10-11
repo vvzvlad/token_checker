@@ -36,6 +36,8 @@ services:
       # and dies quietly, which is a supported configuration.
       # TELEGRAM_BOT_TOKEN: XXX
       # TELEGRAM_CHAT_ID: XXX
+      # A self-hosted Bot API server; unset means https://api.telegram.org.
+      # TELEGRAM_BOT_API_SERVER: XXX
       # The default below is a production contract: the stack does not pass this
       # variable and the image's HEALTHCHECK curls the same default. Override it only if
       # you also know what the healthcheck will then probe.

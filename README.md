@@ -34,6 +34,7 @@ See `.env.example` for the annotated list.
 | `ETHERSCAN_API_KEY` | yes | — | Etherscan V2 API key, used for both ETH and token calls |
 | `TELEGRAM_BOT_TOKEN` | no | — | Where the watchdog announces that it is killing the process |
 | `TELEGRAM_CHAT_ID` | no | — | Addressee of that notice |
+| `TELEGRAM_BOT_API_SERVER` | no | `https://api.telegram.org` | Self-hosted Bot API server that notice goes through |
 | `HEALTH_PORT` | no | `8080` | Port the `/health` server listens on |
 
 A missing or invalid variable prints a message naming it and exits 1 — it does not start.

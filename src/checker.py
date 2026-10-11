@@ -102,7 +102,8 @@ def run():
     watchdog = GristWatchdog(
         logger,
         telegram_bot_token=settings.telegram_bot_token,
-        telegram_chat_id=settings.telegram_chat_id)
+        telegram_chat_id=settings.telegram_chat_id,
+        telegram_bot_api_server=settings.telegram_bot_api_server)
     watchdog.start()
 
     grist = GRIST(settings.grist_server, settings.grist_doc_id, settings.grist_api_key,

@@ -62,7 +62,8 @@ def _body_excerpt(payload, limit=BODY_EXCERPT_LIMIT):
 
 
 class GristWatchdog:
-    def __init__(self, logger, telegram_bot_token=None, telegram_chat_id=None):
+    def __init__(self, logger, telegram_bot_token=None, telegram_chat_id=None,
+                 telegram_bot_api_server=None):
         self._timeout = WATCHDOG_TIMEOUT
         self._lock = threading.Lock()
         self._running = True
@@ -70,6 +71,8 @@ class GristWatchdog:
         self.logger = logger
         self.telegram_bot_token = telegram_bot_token
         self.telegram_chat_id = telegram_chat_id
+        # A self-hosted Bot API server; None means the public api.telegram.org.
+        self.telegram_bot_api_server = telegram_bot_api_server
         self.reset_timeout()
         self.logger.info(f"Watchdog initialized with timeout: {self._timeout} seconds")
 
@@ -88,7 +91,8 @@ class GristWatchdog:
     def send_telegram_notification(self, message):
         try:
             if self.telegram_bot_token and self.telegram_chat_id:
-                telegram_url = f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage"
+                server = (self.telegram_bot_api_server or "https://api.telegram.org").rstrip("/")
+                telegram_url = f"{server}/bot{self.telegram_bot_token}/sendMessage"
                 response = requests.post(telegram_url, json={
                     "chat_id": self.telegram_chat_id,
                     "text": message

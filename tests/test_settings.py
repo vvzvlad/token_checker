@@ -19,7 +19,8 @@ from src.redact import MIN_SECRET_LENGTH
 from src.settings import Settings
 
 REQUIRED_VARS = ("GRIST_SERVER", "GRIST_DOC_ID", "GRIST_API_KEY", "ETHERSCAN_API_KEY")
-OPTIONAL_VARS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "HEALTH_PORT")
+OPTIONAL_VARS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_BOT_API_SERVER",
+                 "HEALTH_PORT")
 
 # The three credentials, and the two that are not. The split is what `Secret` /
 # `OptionalSecret` vs `Required` / `OptionalStripped` encodes in src/settings.py,

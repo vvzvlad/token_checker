@@ -52,7 +52,7 @@ make run               # runs .venv/bin/python main.py
 
 ### The environment variable names are a production contract
 `GRIST_SERVER`, `GRIST_DOC_ID`, `GRIST_API_KEY`, `ETHERSCAN_API_KEY` (all required) and
-`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (both optional) are exactly what the `crypt-common`
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_BOT_API_SERVER` (all optional) are exactly what the `crypt-common`
 stack supplies. Renaming any of them takes production down. `HEALTH_PORT` exists in
 `src/settings.py` but the stack does **not** pass it, so the 8080 default is what production
 listens on — and it is the port the Dockerfile's `HEALTHCHECK` curls.

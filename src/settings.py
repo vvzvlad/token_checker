@@ -9,8 +9,8 @@ a client.
 The variable NAMES below are a production contract: they are what the
 `crypt-common` stack on nebula feeds the `tokenchecker` container. Renaming any of
 them takes production down — the stack passes GRIST_SERVER, GRIST_DOC_ID,
-GRIST_API_KEY, ETHERSCAN_API_KEY, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and
-nothing else.
+GRIST_API_KEY, ETHERSCAN_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID and
+TELEGRAM_BOT_API_SERVER and nothing else.
 """
 
 from typing import Annotated, Optional
@@ -155,6 +155,9 @@ class Settings(BaseSettings):
     # apply to it.
     telegram_bot_token: OptionalSecret = None
     telegram_chat_id: OptionalStripped = None
+    # A self-hosted Bot API server, `http(s)://host[:port]`; unset means the
+    # public https://api.telegram.org.
+    telegram_bot_api_server: OptionalStripped = None
 
     # --- Non-secret operational configuration: a default is fine. --------------
     # The port the /health server listens on. 8080 is a production contract: the

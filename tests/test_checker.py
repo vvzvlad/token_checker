@@ -99,7 +99,8 @@ def loop(monkeypatch, logger):
     state = Loop(logger)
 
     class FakeWatchdog:
-        def __init__(self, logger, telegram_bot_token=None, telegram_chat_id=None):
+        def __init__(self, logger, telegram_bot_token=None, telegram_chat_id=None,
+                     telegram_bot_api_server=None):
             state.events.append("watchdog_init")
             state.watchdog_init = (telegram_bot_token, telegram_chat_id)
 
