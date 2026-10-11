@@ -387,12 +387,12 @@ def test_find_none_value_returns_the_first_wallet_that_is_due():
         Wallet(2, Address="0xdue", Value=""),
         Wallet(3, Address="0xalso-due", Value=None),
     ]
-    assert find_none_value(FakeGrist(rows)).id == 2
+    assert find_none_value(FakeGrist(rows), "Wallets").id == 2
 
 
 def test_find_none_value_treats_none_and_empty_string_alike():
     rows = [Wallet(1, Address="0xdue", Value=None)]
-    assert find_none_value(FakeGrist(rows)).id == 1
+    assert find_none_value(FakeGrist(rows), "Wallets").id == 1
 
 
 @pytest.mark.parametrize("address", [None, ""])
@@ -400,13 +400,13 @@ def test_a_wallet_without_an_address_is_never_picked_up(address):
     # There is nothing to ask Etherscan about, and picking it would make the loop
     # spin on the same unusable row forever.
     rows = [Wallet(1, Address=address, Value="")]
-    assert find_none_value(FakeGrist(rows)) is None
+    assert find_none_value(FakeGrist(rows), "Wallets") is None
 
 
 def test_no_due_wallet_returns_none():
     rows = [Wallet(1, Address="0xa", Value="1"), Wallet(2, Address="0xb", Value="2")]
-    assert find_none_value(FakeGrist(rows)) is None
+    assert find_none_value(FakeGrist(rows), "Wallets") is None
 
 
 def test_an_empty_table_returns_none():
-    assert find_none_value(FakeGrist([])) is None
+    assert find_none_value(FakeGrist([]), "Wallets") is None

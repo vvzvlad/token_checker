@@ -7,30 +7,23 @@ One wallet per iteration. A wallet is "due" when its `Value` cell is empty and i
 has an address, so an operator re-arms a wallet by clearing that cell. When there
 is nothing due the loop sleeps ten seconds and looks again.
 
-Three things run alongside the loop and all three matter to the deployment:
-the /health server (src/health.py), which is what the Dockerfile's HEALTHCHECK
-curls; the watchdog (src/watchdog.py), which kills the process if an iteration
-never comes round; and the requests timeout patch (src/http_timeout.py), without
-which a stalled Grist connection hangs the process for good.
+Two things run alongside the loop and both matter to the deployment: the
+/health server (src/health.py), which is what the Dockerfile's HEALTHCHECK
+curls; and the watchdog (src/watchdog.py), which kills the process if an
+iteration never comes round.
 """
 
 import logging
 import time
 
 import colorama
+from grist_client import GristClient
 
 from src.balances import check_balance, find_none_value
-from src.grist import GRIST
 from src.health import HealthCheckHandler, start_health_server
-from src.http_timeout import install_default_timeout
 from src.redact import redact
 from src.settings import settings
 from src.watchdog import GristWatchdog
-
-# grist_api issues requests without a timeout, so a stalled Grist connection
-# would otherwise hang the process forever. Installed at import time, before any
-# HTTP call can be made.
-install_default_timeout()
 
 # The three tables of the Grist document. They are that document's names, so they
 # are not configuration and have no environment variable.
@@ -94,6 +87,30 @@ def safe_text(error):
                   settings.telegram_bot_token)
 
 
+def setting(grist, name):
+    """The `name` column of the one-row Settings table.
+
+    That table's columns are the settings, so `GristClient.get_setting`, which reads
+    a Setting/Value list, does not fit it.
+    """
+    return getattr(grist.fetch_table(SETTINGS_TABLE)[0], name)
+
+
+def find_chain(grist, target_id, table):
+    if target_id is None or target_id == "" or int(target_id) == 0:
+        raise Exception("Chain is None!")
+    data = grist.fetch_table(table)
+    if len(data) == 0:
+        raise Exception("Chains table is empty!")
+    search_result = [row for row in data if row.id == target_id]
+    if len(search_result) == 0:
+        raise Exception("Chain not found!")
+    chain_id = search_result[0].Chain_id
+    if chain_id is None or chain_id == "":
+        raise Exception("ID is None!")
+    return chain_id
+
+
 def run():
     logger = build_logger()
 
@@ -106,8 +123,7 @@ def run():
         telegram_bot_api_server=settings.telegram_bot_api_server)
     watchdog.start()
 
-    grist = GRIST(settings.grist_server, settings.grist_doc_id, settings.grist_api_key,
-                  NODES_TABLE, SETTINGS_TABLE, logger)
+    grist = GristClient(settings.grist_server, settings.grist_doc_id, settings.grist_api_key)
 
     start_health_server(settings.health_port, logger)
 
@@ -123,21 +139,16 @@ def run():
             # loop recovered: /health answers 503, docker calls the container
             # unhealthy, and auto-heal restarts a service that is working.
             HealthCheckHandler.set_health(True)
-            chain = grist.find_settings("Chain")
-            chain_id = grist.find_chain(chain, CHAINS_TABLE)
+            chain = setting(grist, "Chain")
+            chain_id = find_chain(grist, chain, CHAINS_TABLE)
             logger.info(f"Chain: {chain}/{chain_id}")
-            token = grist.find_settings("Token")
-            divider = parse_divider(grist.find_settings("Divider"), logger)
+            token = setting(grist, "Token")
+            divider = parse_divider(setting(grist, "Divider"), logger)
 
-            # Reading Grist to CHOOSE the wallet is deliberately out here, in the
-            # outer `try`, and not one line further down inside the inner one.
-            # `none_value_wallet` is a local of `run()` while the loop is inside
-            # `run()`, so the name stays bound across iterations: with this call
-            # under the inner handler, a transient read failure sent that handler
-            # to `grist.update(none_value_wallet.id, ...)` holding the PREVIOUS
-            # iteration's wallet, and overwrote its freshly computed balance with
-            # "--". Do not move it back for symmetry.
-            none_value_wallet = find_none_value(grist)
+            # Chosen in the outer `try`, not the inner one: `none_value_wallet` stays
+            # bound across iterations, so a read failure under the inner handler would
+            # overwrite the PREVIOUS iteration's wallet with "--".
+            none_value_wallet = find_none_value(grist, NODES_TABLE)
             if none_value_wallet is None:
                 logger.info("All wallets have values, sleep 10s")
                 time.sleep(10)
@@ -153,7 +164,7 @@ def run():
                     none_value_wallet.Address, chain_id, settings.etherscan_api_key,
                     token, logger, divider)
                 HealthCheckHandler.set_health(True)
-                grist.update(none_value_wallet.id, {"Value": value, "Comment": msg})
+                grist.update(NODES_TABLE, none_value_wallet.id, {"Value": value, "Comment": msg})
             except Exception as e:
                 HealthCheckHandler.set_health(True)
                 # "--" rather than an empty cell: an empty `Value` is what marks a
@@ -172,7 +183,7 @@ def run():
                 # ever sees is "Grist is unreachable" — the reason the balance
                 # check failed reaches neither the cell nor the log and is gone.
                 logger.error(f"Error occurred: {reason}")
-                grist.update(none_value_wallet.id,
+                grist.update(NODES_TABLE, none_value_wallet.id,
                              {"Value": "--", "Comment": f"Error: {reason}"})
         except Exception as e:
             HealthCheckHandler.set_health(True)

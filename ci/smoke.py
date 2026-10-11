@@ -111,8 +111,6 @@ SHIPPED_FILES = (
     "src/settings.py",
     "src/config_errors.py",
     "src/redact.py",
-    "src/http_timeout.py",
-    "src/grist.py",
     "src/health.py",
     "src/watchdog.py",
     "src/balances.py",
@@ -127,8 +125,6 @@ FIRST_PARTY_MODULES = (
     "src.settings",
     "src.config_errors",
     "src.redact",
-    "src.http_timeout",
-    "src.grist",
     "src.health",
     "src.watchdog",
     "src.balances",
@@ -145,7 +141,7 @@ FIRST_PARTY_MODULES = (
 # packages this program never loads while missing the one it does.
 THIRD_PARTY_MODULES = (
     "colorama",
-    "grist_api",
+    "grist_client",
     "pydantic",
     "pydantic_settings",
     "requests",
@@ -235,7 +231,7 @@ EXPECTED_TARGETS = (
 #   + 30 (rm probe)   +  60 (probe run -d, the image's own command)
 #   + 60 (the compile/import sweep, one exec over every shipped file)
 #   + 5 * 30 (one import exec per third-party module)
-#   + 10 * 30 (one import exec per first-party module)
+#   + 8 * 30 (one import exec per first-party module)
 #   + 30 (exec: /proc/1/cmdline)  + 30 (exec: /proc/1/status)
 #   + 30 (exec: excluded-path sweep)
 #   + 60 (exec: the health probe, which retries inside the container)
@@ -243,7 +239,7 @@ EXPECTED_TARGETS = (
 #          one final inspect that fetches the probe's own log for the failure message)
 #   + 30 (docker logs: the probe container's own output, taken before it is removed)
 #   + 30 (rm probe, finally) + 30 (rm guard, finally)
-#   = 1080 s, eighteen minutes. Both workflows allow 20.
+#   = 1020 s, seventeen minutes. Both workflows allow 20.
 # Two of these `rm`s are PRE-run cleanups: each container is removed by name before it is
 # started, so a re-run from the Gitea UI — which keeps the same run id, hence the same
 # $SMOKE_NAME — cannot die on "name already in use".
@@ -608,7 +604,7 @@ def check_third_party_imports(name, declared_by_image, blocked=None):
         # checks while still printing a cheerful `ok` line.
         rows.append((list_target, (
             "the image's files were found to import NO third-party module at all. They "
-            "import grist_api, requests, colorama, pydantic and pydantic_settings at the "
+            "import grist_client, requests, colorama, pydantic and pydantic_settings at the "
             "very least, so this is a broken extraction, not a lean program — and a gate "
             "that silently degrades to no checks is worse than no gate")))
     elif sorted(declared_by_image) != sorted(THIRD_PARTY_MODULES):
