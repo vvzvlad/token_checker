@@ -19,11 +19,9 @@ Production is the `tokenchecker` container in the `crypt-common` stack on **nebu
   - `config_errors.py` — ValidationError → readable message + `exit(1)`
   - `redact.py` — cuts credential values out of text on its way to a log or to Grist
   - `checker.py` — the main loop
-  - `grist.py` — Grist client wrapper (column-name sanitising, timestamps)
   - `balances.py` — the Etherscan calls and the wallet pick-up rule
   - `health.py` — the `/health` endpoint and its class-level health flag
   - `watchdog.py` — the dead-man switch that kills the process on a stuck loop
-  - `http_timeout.py` — global default timeout for `requests`
 - `tests/` — pytest
 - `ci/smoke.py` — the image gate, run on the CI runner between build and push
 - `data/` — runtime state directory (gitignored; empty today, see below)
@@ -41,7 +39,7 @@ make test              # runs .venv/bin/python -m pytest
 ```
 The suite never touches the network: `tests/conftest.py` injects placeholder credentials
 before anything can import `src.settings`, every HTTP call is mocked at the `requests`
-boundary, and `GristDocAPI` is replaced by a recording double.
+boundary, and the Grist client is replaced by a recording double.
 
 ## Running the app
 ```bash
@@ -62,8 +60,8 @@ listens on — and it is the port the Dockerfile's `HEALTHCHECK` curls.
 that writes `"--"` into the wallet it was working on. `none_value_wallet` is a local of
 `run()` while the `while True` is inside `run()`, so the binding **survives the iteration**.
 
-While `find_none_value(grist)` was inside the inner `try`, any transient Grist read failure
-sent that handler to `grist.update(none_value_wallet.id, {"Value": "--", "Comment": ...})`
+While `find_none_value(grist, NODES_TABLE)` was inside the inner `try`, any transient Grist read failure
+sent that handler to `grist.update(NODES_TABLE, none_value_wallet.id, {"Value": "--", "Comment": ...})`
 holding the wallet from the **previous** iteration — and that write succeeded. A balance
 computed correctly seconds earlier was replaced by `"--"` and an error message about a
 failure that had nothing to do with that wallet, with nothing afterwards to tell it apart
@@ -118,47 +116,14 @@ for the rest of the process's life as soon as the loop settled into that branch 
 answering 503 forever, auto-heal restarting a service that works, and the fresh process
 settling into the same state.
 
-### The 30 s global request timeout changed what the watchdog is for
-`src/http_timeout.py` gives every `requests` call that does not set its own a 30 s default,
-which is what finally bounds grist_api (it passes no timeout at all). This is a **deliberate
-behaviour change introduced by this refactor**, not a tidy-up: before it, a stalled Grist
-connection hung the process indefinitely and the watchdog was the only thing that ever ended
-it. Now such a call raises, the loop logs it and sleeps, and the process is not killed.
-
-Two consequences worth having written down, and the arithmetic is the part that is easy to
-get wrong:
-- **30 s is not a budget per call.** `requests` takes the number as a connect/read PAIR and
-  applies it to EACH PHASE separately, so one call that connects slowly and then answers
-  slowly takes up to ~60 s, not 30 (the read timeout is also per-chunk, not per-response —
-  see below). An iteration makes seven outbound calls — three `find_settings`, one
-  `find_chain`, one `fetch_table` for the wallets, one Etherscan lookup, one write-back — so
-  its worst case is around **420 s**, not 210.
-- 420 s is **more than the watchdog's 300 s**, which the loop resets at the top of every
-  iteration. So the watchdog's thresholds (`< 60 s` → unhealthy, `< 1 s` → `os._exit`) are
-  **reachable by a slow iteration alone**, without anything being wedged at all, and the
-  watchdog remains the primary protection against a hung HTTP call. The timeout narrows the
-  window; it does not close it.
-
-What the timeout does not see at all, and what the watchdog is therefore the only cover for:
-- **name resolution.** `getaddrinfo` runs before the connect phase and is not covered by a
-  connect timeout, so a DNS lookup that never returns is a hang nothing in `requests` ends;
-- **a connection that dribbles bytes.** The read timeout is the gap allowed BETWEEN chunks,
-  not a deadline for the whole response, so a peer that sends one byte every 29 s is never
-  timed out at all;
-- **grist_api's own retry loop.** `GristDocAPI.call` (`grist_api/grist_api.py`) wraps its
-  request in an unconditional `while True` and, on any response whose error message contains
-  `SQLITE_BUSY`, does `time.sleep(2)` and `continue`. That loop is bounded by NOTHING — not
-  by a deadline, not by an attempt count. Our patch bounds each individual attempt inside it
-  and cannot bound the loop, so a document that stays busy keeps one iteration going
-  indefinitely;
-- a deadlock in our own code.
-
-None of this is a defect — a bounded call that returns an error is strictly better than a
-process killed for it. But do **not** reason about this service as though the timeout had
-retired the watchdog: it is still what ends every case listed above, and it is still reachable
-on a merely slow iteration. Do not weaken its thresholds on the strength of the 30 s default,
-and do not "simplify" the timeout patch away on the grounds that the watchdog covers it —
-each covers what the other cannot.
+### Request timeouts do not retire the watchdog
+`grist_client` sets a 30 s timeout on every Grist request; the Etherscan and Telegram calls
+pass their own. `requests` applies it to the connect and the read phase separately, so one
+call can take ~60 s, and an iteration's seven calls (three Settings reads, the Chains read,
+the wallets read, the Etherscan lookup, the write-back) can outlast the watchdog's 300 s on
+their own. Name resolution, a connection that dribbles bytes and a deadlock in our own code
+are bounded by no timeout at all. The watchdog is the cover for all of these: do not weaken
+its thresholds on the strength of the timeouts.
 
 ### `CMD` is a direct `python main.py`
 It used to be `while true; do python token_checker.py; sleep 10; done`. That wrapper made

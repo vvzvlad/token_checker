@@ -210,7 +210,7 @@ jobs:
       # artefact most needs looking at.
       #
       # 20 minutes is set against ci/smoke.py's OWN worst case, which the script documents
-      # and sums from its individual per-call bounds: 1080 s, eighteen minutes, if every
+      # and sums from its individual per-call bounds: 1020 s, seventeen minutes, if every
       # docker call it makes runs out its budget. In practice the whole gate is well under a
       # minute. Being killed BY this timeout is what the margin is for: the script's own
       # container cleanup would not run, and the `if: always()` step below is what catches

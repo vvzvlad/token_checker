@@ -60,8 +60,10 @@ class Loop:
         self.logger = logger
         self.events = []            # ordered names of everything that happened
         self.updates = []           # (row_id, payload, health flag at the time)
+        self.update_tables = []     # table of every grist.update call
         self.settings_asked = []
         self.chain_lookups = []
+        self.wallet_tables = []
         self.sleeps = []            # (seconds, health flag at the time)
         self.balance_calls = []     # (address, chain_id, token, divider, health flag)
         self.grist_init = None
@@ -111,19 +113,12 @@ def loop(monkeypatch, logger):
             state.events.append("reset_timeout")
 
     class FakeGrist:
-        def __init__(self, server, doc_id, api_key, nodes_table, settings_table, logger):
+        def __init__(self, server, doc_id, api_key):
             state.events.append("grist_init")
-            state.grist_init = (server, doc_id, api_key, nodes_table, settings_table)
+            state.grist_init = (server, doc_id, api_key)
 
-        def find_settings(self, setting):
-            state.settings_asked.append(setting)
-            return state.settings_values[setting]
-
-        def find_chain(self, target_id, table):
-            state.chain_lookups.append((target_id, table))
-            return 1
-
-        def update(self, row_id, updates, table=None):
+        def update(self, table, row_id, updates):
+            state.update_tables.append(table)
             if state.update_errors:
                 # Nothing is recorded in `state.updates`: a write that raised is a
                 # write that did not land, and recording it would let a test
@@ -137,8 +132,17 @@ def loop(monkeypatch, logger):
         state.events.append("health_server")
         state.health_port = port
 
-    def fake_find_none_value(grist):
+    def fake_setting(grist, name):
+        state.settings_asked.append(name)
+        return state.settings_values[name]
+
+    def fake_find_chain(grist, target_id, table):
+        state.chain_lookups.append((target_id, table))
+        return 1
+
+    def fake_find_none_value(grist, table):
         state.events.append("find_none_value")
+        state.wallet_tables.append(table)
         item = state.next(state.wallets, "wallet script exhausted")
         return item(grist) if callable(item) else item
 
@@ -156,7 +160,9 @@ def loop(monkeypatch, logger):
         state.sleeps.append((seconds, HealthCheckHandler.is_healthy))
 
     monkeypatch.setattr(src.checker, "GristWatchdog", FakeWatchdog)
-    monkeypatch.setattr(src.checker, "GRIST", FakeGrist)
+    monkeypatch.setattr(src.checker, "GristClient", FakeGrist)
+    monkeypatch.setattr(src.checker, "setting", fake_setting)
+    monkeypatch.setattr(src.checker, "find_chain", fake_find_chain)
     monkeypatch.setattr(src.checker, "start_health_server", fake_start_health_server)
     monkeypatch.setattr(src.checker, "find_none_value", fake_find_none_value)
     monkeypatch.setattr(src.checker, "check_balance", fake_check_balance)
@@ -209,8 +215,7 @@ def test_the_table_names_are_the_grist_documents_own(loop):
     # one iteration's worth of reads is recorded.
     loop.wallets = []
     loop.go()
-    _, _, _, nodes_table, settings_table = loop.grist_init
-    assert (nodes_table, settings_table) == ("Wallets", "Settings")
+    assert loop.wallet_tables == ["Wallets"]
     assert (NODES_TABLE, SETTINGS_TABLE) == ("Wallets", "Settings")
     assert loop.chain_lookups == [(loop.settings_values["Chain"], "Chains")]
     assert CHAINS_TABLE == "Chains"
@@ -253,6 +258,7 @@ def test_the_service_is_unhealthy_only_while_the_balance_call_is_in_flight(loop,
     row_id, payload, health_at_write = loop.updates[0]
     assert (row_id, payload) == (1, {"Value": "1.5", "Comment": ""})
     assert health_at_write is True
+    assert loop.update_tables == ["Wallets"]
 
 
 def test_a_failed_balance_call_puts_the_health_flag_back(loop, health_flag):
@@ -266,6 +272,7 @@ def test_a_failed_balance_call_puts_the_health_flag_back(loop, health_flag):
     assert row_id == 1
     assert payload["Value"] == "--"
     assert health_at_write is True
+    assert loop.update_tables == ["Wallets"]
 
 
 def test_the_reason_is_logged_even_when_grist_cannot_be_written_to(loop, health_flag):
@@ -344,7 +351,7 @@ def test_a_failed_grist_read_never_writes_to_the_previous_wallet(loop, health_fl
     `run()`, so the binding outlives the iteration. With the Grist read under the
     inner handler, a transient read failure — a 502 from the API, a dropped
     connection, anything — sent that handler to
-    `grist.update(none_value_wallet.id, {"Value": "--", ...})` still holding the
+    `grist.update(NODES_TABLE, none_value_wallet.id, {"Value": "--", ...})` still holding the
     PREVIOUS wallet, and the write succeeded: a balance computed correctly seconds
     earlier was replaced by "--" and an error message about a failure that had
     nothing to do with that wallet. Silent, and indistinguishable afterwards from

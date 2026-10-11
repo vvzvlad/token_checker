@@ -15,9 +15,7 @@ import requests
 
 from src.redact import redact
 
-# One outbound call per balance check. The explicit timeout survives the global
-# default installed by src/http_timeout.py (that one only fills in a MISSING
-# timeout), so this number is the one in force here.
+# One outbound call per balance check.
 ETHERSCAN_TIMEOUT = 30
 
 
@@ -175,14 +173,14 @@ def check_balance(address, chain_id, api_key, token, logger, divider):
         ) from None
 
 
-def find_none_value(grist):
+def find_none_value(grist, table):
     """The first wallet with an address and no value yet, or None.
 
     "First" is the table's own order and is deliberate: the loop processes one
     wallet per iteration, so clearing a `Value` cell in Grist is what re-arms a
     wallet, and it is picked up in the order the document shows.
     """
-    wallets = grist.fetch_table()
+    wallets = grist.fetch_table(table)
     for wallet in wallets:
         if (wallet.Value is None or wallet.Value == ""):
             if (wallet.Address is not None and wallet.Address != ""):
