@@ -13,22 +13,10 @@ LITERALS:
 * `SMOKE_ENV` in `ci/smoke.py`, the configuration for the long-lived container the
   image gate starts and then `docker exec`s into.
 
-None of them goes through the helper, all three take precedence over the
-`setdefault`s in tests/conftest.py, and the first two are YAML that no python ever
-reads. So raising `MIN_SECRET_LENGTH` past their length is green on a workstation and
-red in CI only — the worst shape a failure can have, because the run that finds it is
-the one nobody is watching and the diff that caused it is already pushed.
-
-This file is what moves that failure back to `make test`. It reads the three sources
-and asserts of each placeholder credential exactly what `Secret` will assert of it:
-that it is long enough for `redact()` to cover. A comment used to carry this warning
-instead; a comment cannot go red, and that one had already fallen out of date by one
-whole source (the gate) by the time anybody re-read it.
-
-Deliberately about LENGTH and nothing else. These values are obviously-fake
-placeholders pointed at `.invalid` hostnames and nothing in CI performs a real request
-with them — their content is not this file's business, only the one property that
-couples them to a constant in `src/`.
+None of them goes through the helper and all three take precedence over the
+`setdefault`s in tests/conftest.py, so raising `MIN_SECRET_LENGTH` past their length
+would otherwise fail only in CI. This file asserts of each placeholder credential what
+`Secret` asserts of it: length, and nothing else.
 """
 
 import re
@@ -49,22 +37,13 @@ WORKFLOWS = (
     ".gitea/workflows/image-check-publish.yml",
 )
 
-# The variables carrying `Secret` / `OptionalSecret` in src/settings.py, i.e. the ones
-# with a floor at all. `GRIST_SERVER` and `GRIST_DOC_ID` are deliberately absent: they
-# are addresses on `Required`, no caller hands them to `redact()`, and a short doc id
-# is an ordinary one — measuring them here would invent a constraint the program does
-# not have. `TELEGRAM_BOT_TOKEN` is listed although no source below sets one today;
-# optional says it may be ABSENT, not that it may be too short when it is there, and
-# the day a source starts passing one is the day this list has to already cover it.
+# The variables carrying `Secret` / `OptionalSecret` in src/settings.py. The Grist
+# address and doc id have no floor. `TELEGRAM_BOT_TOKEN` is listed although no source
+# sets one: optional means absent, not short.
 CREDENTIAL_VARS = ("GRIST_API_KEY", "ETHERSCAN_API_KEY", "TELEGRAM_BOT_TOKEN")
 
-# What every source has to be found supplying, and the reason this file cannot pass by
-# finding nothing. A regex over a YAML file is a fragile way to learn something, and
-# its fragility is one-directional: a reformatted `docker run` block, a renamed step,
-# a move to `env:` keys all make the pattern match zero lines — which without this
-# would be a green run reporting that every placeholder it did not find is fine. The
-# two names are the ones `src/settings.py` makes mandatory AND puts a floor on, so a
-# source that does not supply both cannot start the container anyway.
+# What every source has to be found supplying, so a regex that stops matching (a
+# reformatted `docker run` block) cannot pass by finding nothing.
 REQUIRED_EVERYWHERE = ("GRIST_API_KEY", "ETHERSCAN_API_KEY")
 
 # `docker run -e NAME=value` as the workflows spell it. The value stops at whitespace,
@@ -111,17 +90,10 @@ def _assert_placeholders_clear_the_floor(source, assignments):
 
 @pytest.mark.parametrize("relative_path", WORKFLOWS)
 def test_the_workflow_placeholders_clear_the_redaction_floor(relative_path):
-    # Raising MIN_SECRET_LENGTH past the shortest literal in these files used to be
-    # green here and red only once the push reached the runner, with the failure
-    # arriving as a collection-time exit(1) out of tests/conftest.py — no test named,
-    # no assertion pointing anywhere near the constant that moved.
     _assert_placeholders_clear_the_floor(relative_path, _from_workflow(relative_path))
 
 
 def test_the_smoke_gate_placeholders_clear_the_redaction_floor():
-    # The third source, and the one the warning in tests/conftest.py used to miss
-    # entirely. It fails differently from the workflows and later: the gate starts a
-    # LONG-LIVED container to `docker exec` into, so a placeholder under the floor
-    # makes that container exit within a second and every probe that needed it
-    # reports failure — an image-wide red with nothing in it naming a length.
+    # A placeholder under the floor would make the gate's long-lived container exit
+    # at once and fail every probe without naming a length.
     _assert_placeholders_clear_the_floor("ci/smoke.py SMOKE_ENV", _from_smoke_env())

@@ -1,10 +1,7 @@
 """Cutting credential values out of text that is about to leave the process.
 
-Small module, but it is the thing standing between an api key and `docker logs` /
-a shared Grist document, so the three shapes that would break it silently — a
-secret that is absent, a secret that is the empty string, and a "secret" so short
-that replacing it shreds the message around it — are pinned here rather than
-discovered in production.
+Pins the three shapes that would break it silently: an absent secret, an empty
+one, and one so short that replacing it shreds the message.
 """
 
 import pytest
@@ -12,12 +9,8 @@ from conftest import long_enough
 
 from src.redact import MIN_SECRET_LENGTH, PLACEHOLDER, redact
 
-# Long enough to be replaced at all — see the boundary test at the bottom. A
-# stand-in shorter than the guard would make every test using it pass because
-# nothing was replaced, which is not what any of them is checking, so the length
-# is DERIVED from the constant rather than written at a value that clears it
-# today. (The tests further down that deliberately go under the guard are about
-# the guard itself and stay literal.)
+# Long enough to be replaced at all, derived from the constant (a shorter stand-in
+# would pass because nothing was replaced). Tests about the guard itself stay literal.
 SECRET = long_enough("SECRET-api-key")
 
 
@@ -73,17 +66,10 @@ def test_no_secrets_at_all_is_a_plain_stringification():
 def test_a_value_below_the_minimum_length_is_left_in_place(length, replaced):
     """The boundary itself, from both sides.
 
-    Replacement is blind — every occurrence of the value, anywhere in the text —
-    so a value short enough to occur by coincidence puts `***` into timestamps,
-    hex addresses and ordinary words instead of over a secret, damaging the
-    message without hiding anything. That is what the guard refuses to do, and it
-    refuses on LENGTH alone, knowing nothing about which variable it was handed.
-
-    The other side of the same trade is that a credential below the line would be
-    left in the text in full, so the constant is not allowed to be a lone
-    convention: `src/settings.py` imports it as the `min_length` of its `Secret`
-    alias, and `tests/test_settings.py` pins that a shorter credential is refused
-    at startup.
+    Replacement is blind, so a short value would put `***` into timestamps and
+    addresses; the guard refuses on length alone. A credential below the line
+    would leak, so `src/settings.py` uses the constant as `Secret`'s `min_length`
+    (pinned in `tests/test_settings.py`).
     """
     secret = "x" * length
     text = "value={} end".format(secret)
@@ -93,15 +79,7 @@ def test_a_value_below_the_minimum_length_is_left_in_place(length, replaced):
 
 
 def test_a_short_value_would_have_been_cut_out_of_text_that_is_not_the_secret():
-    # What the guard actually protects, in the shape the damage takes: a short run
-    # of characters is a SUBSTRING of things that occur naturally in an error
-    # message. Here the "secret" sits inside a request id that has nothing to do
-    # with it, and replacing it would leave the operator reading "***678" — the id
-    # destroyed, and nothing hidden, because the value was never in this text as a
-    # secret in the first place.
-    #
-    # No caller passes anything this short today, and that is the point of the
-    # guard rather than an argument against it: it is what makes `redact()` safe
-    # to hand a value without first proving where that value can appear.
+    # A short value is a substring of ordinary text: replacing it here would turn
+    # the request id into "***678" and hide nothing.
     text = "HTTP 500 for request 12345678, retries exceeded with url: /v2/api"
     assert redact(text, "12345") == text

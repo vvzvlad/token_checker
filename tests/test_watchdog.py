@@ -1,15 +1,8 @@
 """The watchdog: the countdown, the health flag, and the way it kills the process.
 
-The last of those is why this file exists. `decrease_timeout_thread` used to call
-`sys.exit(1)`, which in a NON-MAIN thread raises SystemExit in that thread only:
-the countdown thread died quietly, the process kept running, and the watchdog
-stopped existing — after logging that it had fired. The container then ran
-forever with no dead-man switch and nothing anywhere said so.
-
-So `os._exit` is not an implementation detail here, it is the fix, and it is
-pinned: called exactly once, with code 1, and only after the reason has been
-logged. No thread is started in this file — `tick()` is driven by hand, which is
-what makes the countdown testable at all instead of a five-minute wait.
+`sys.exit(1)` in a non-main thread only ends that thread, so `os._exit` is
+pinned: called exactly once, with code 1, after the reason is logged. No thread is
+started here; `tick()` is driven by hand.
 """
 
 import os
@@ -33,13 +26,9 @@ REDACTABLE_TOKEN = long_enough("123456789:AA-this-is-not-a-real-bot-token")
 def telegram_answer(status_code, url, reason="OK", body=b'{"ok": true}'):
     """A REAL `requests.Response`, not a hand-rolled double.
 
-    The whole point of the checks in `send_telegram_notification` is that a
-    refused notification is an ordinary response rather than an exception, and
-    that `raise_for_status()` builds its message out of the URL — which carries
-    the bot token as a path segment. A double would let this file decide both of
-    those; the real class is what pins them to what `requests` actually does, and
-    it is also what makes `.json()` behave the way it does in production, body and
-    all.
+    A refused notification is an ordinary response, `raise_for_status()` quotes
+    the URL with the bot token, and `.json()` parses the real body; the real
+    class pins all three to what `requests` does.
     """
     response = requests.Response()
     response.status_code = status_code
@@ -52,13 +41,9 @@ def telegram_answer(status_code, url, reason="OK", body=b'{"ok": true}'):
 class FakeExit:
     """Stands in for os._exit, which would otherwise end the test run itself.
 
-    It also takes a SNAPSHOT of whatever the test asks for, at the moment it is
-    called. That is the difference between this double and the real thing, and it
-    is the whole point: `os._exit` never returns, so everything the implementation
-    does after it is code that will never run in production. A test that inspects
-    the log after `_run_to_death()` returns is inspecting state that only exists
-    because this fake returned — and it would pass an implementation that exits
-    first and logs afterwards, i.e. one whose reason for dying is lost forever.
+    It snapshots what the test asks for at the moment of the call: `os._exit`
+    never returns, so state inspected afterwards would let an implementation that
+    exits first and logs later pass.
     """
 
     def __init__(self):
@@ -232,15 +217,9 @@ def test_telegram_is_notified_when_both_variables_are_set(logger, health_flag, n
 
 def test_a_notification_telegram_refuses_is_not_logged_as_sent(logger, health_flag, no_exit,
                                                                monkeypatch):
-    """The claim that used to be stronger than the check.
+    """A 401 (rotated, revoked or padded token) must not be logged as delivered.
 
-    401 is exactly how a broken bot token arrives — rotated, revoked, or still
-    carrying the whitespace it was configured with — and it does NOT raise:
-    `requests` treats "the server answered, and the answer is no" as a completely
-    successful call. The result was thrown away and the next line logged "Telegram
-    notification sent about watchdog timeout" unconditionally, so the single log
-    line written at the moment the watchdog kills the container asserted a
-    delivery that never happened.
+    `requests` does not raise on it; the response has to be checked.
     """
     token = REDACTABLE_TOKEN
     posted = []
@@ -291,23 +270,10 @@ def test_a_200_that_is_not_an_ok_envelope_is_not_logged_as_sent(logger, health_f
                                                                 monkeypatch, body, excerpt):
     """The gap the status check alone leaves, and why the body is read too.
 
-    The Bot API mirrors its `error_code` into the HTTP status, so status and body
-    normally agree and this is a narrow case — but it is not an empty one: an
-    intercepting proxy, a gateway with its own 200 error page, or any future
-    partial-success shape answers 200 while the envelope says no. `ok` is the
-    field the API documents as the verdict; checking only the status meant such an
-    answer was written into the log as a delivery, in the single line the operator
-    reads to find out whether anybody was told the container died.
-
-    Parametrised over the shapes that reach this branch, because they differ in
-    what the line can be built OUT OF. Only the first carries a `description`;
-    reporting that field alone rendered the other three as "Telegram refused the
-    notification: None", which tells the reader neither the status nor what
-    arrived — in the case the body is read for. The last two are not dicts at all,
-    and they are what makes the type check load-bearing: without it `payload.get`
-    raises, the same handler still catches it and the process still dies, so the
-    only casualty is the line itself, which degrades from a quoted body to
-    `AttributeError: 'list' object has no attribute 'get'`.
+    A proxy or gateway can answer 200 while the envelope says no; `ok` is the
+    documented verdict. Parametrised over the shapes that reach this branch: only
+    the first has a `description`, and the last two are not dicts (the type check
+    keeps the line a quoted body instead of an AttributeError).
     """
     def refusing_post(url, json=None, timeout=None):
         return telegram_answer(200, url, body=body)
@@ -442,17 +408,8 @@ def test_the_chat_id_is_not_redacted_out_of_the_failure_message(logger, health_f
                                                                 monkeypatch):
     """The addressee is not a secret, and redacting it could only damage the line.
 
-    The chat id used to be passed to `redact()` here alongside the bot token. It
-    is not a credential — it never appears in these texts as one — so the
-    replacement buys nothing, while a chat id long enough to be replaced at all
-    matches any run of characters that happens to equal it. This one is a
-    substring of the request id in the very message being written, which is the
-    whole failure mode `MIN_SECRET_LENGTH` exists to describe: below the guard the
-    damage is silently declined, above it, it is silently done.
-
-    So the fix is not a bigger guard, it is not handing a non-credential to a
-    blind replacer at all — and the guard goes back to being a rule about
-    credentials rather than an accident about this variable's length.
+    The chat id is not a credential. Here it is a substring of the request id in
+    the message, so blind replacement would damage the line and hide nothing.
     """
     # Long enough for `redact()` to actually replace it, which is the premise of
     # the whole test: below the floor the damage is declined and this would pass

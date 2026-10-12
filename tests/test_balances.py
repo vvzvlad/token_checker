@@ -187,13 +187,8 @@ def test_any_other_non_success_status_raises(etherscan, logger, token):
 def test_the_message_names_the_branch_that_actually_ran(etherscan, logger, token, ran, other):
     """One branch, named once, in the cell and in the log.
 
-    The wrapper used to say "token" on BOTH branches while the inner raise said
-    "ETH", so an ETH failure reached the wallet's `Comment` cell as two sentences
-    contradicting each other — "Error while checking token transactions for
-    address 0x...: Exception: Error while checking ETH transactions for address
-    0x...". Nothing downstream could settle it either: `from None` suppresses the
-    context, so the chain that named the real branch is gone by the time anybody
-    reads the cell.
+    The message must not contradict itself about which branch ran; with
+    `from None` the chain cannot settle it afterwards.
     """
     etherscan({"status": "0", "message": "NOTOK", "result": "Invalid API Key"})
     with pytest.raises(Exception) as excinfo:
@@ -214,17 +209,8 @@ def test_the_message_names_the_branch_that_actually_ran(etherscan, logger, token
 
 
 def test_the_branch_is_named_token_when_the_branch_was_never_chosen(logger):
-    # `token.lower()` on a Grist `Token` cell that is not a string fails BEFORE
-    # either branch is picked — and it is the first statement in `check_balance`
-    # that can raise at all, which is what `subject`'s binding has to stay ahead
-    # of. (Not "ahead of the `try`": moved to the first line inside it, the
-    # binding would still be ahead of every raising statement and this test would
-    # still be green. Above the block is simply the position a later edit cannot
-    # push a raise in front of.)
-    #
-    # The handler still has to name something here, and it must not be a NameError
-    # — that replaces the real failure with a second one about the code reporting
-    # it, in the cell the operator is sent to read.
+    # `token.lower()` on a non-string Grist `Token` cell fails before either branch
+    # is picked; the handler must still name something, not raise a NameError.
     with pytest.raises(Exception) as excinfo:
         check_balance("0xabc", 1, "k", None, logger, 18)
     assert "checking token transactions for address 0xabc" in str(excinfo.value)
@@ -244,17 +230,9 @@ def test_the_set_of_failures_reaching_the_comment_cell_is_open(etherscan, logger
                                                                payload, expected_class):
     """Why `EtherscanError` is a type of its own, and why its docstring lists no total.
 
-    The handler at the bottom of `check_balance` catches `Exception`, so what
-    reaches it is open-ended: these three, plus the `KeyError` and `AttributeError`
-    pinned by their own tests above, plus the transport family, plus whatever the
-    next shape of a bad answer turns out to be. Anything that counts them is wrong
-    the next time the API changes.
-
-    All of it arrives at the operator as ONE line in a spreadsheet cell, which is
-    why the class name is put in front of the text: it is the entire
-    classification the reader gets. That is also the argument for
-    `EtherscanError` — "the answer said no" needs a word of its own among these,
-    and "Exception:" would be a word that distinguishes nothing.
+    The handler catches `Exception`, so the set is open-ended. The class name in
+    front of the text is the operator's whole classification, and "the answer
+    said no" needs a word of its own.
     """
     etherscan(payload)
     with pytest.raises(Exception) as excinfo:
@@ -282,13 +260,8 @@ def test_a_malformed_payload_raises_rather_than_writing_a_wrong_number(etherscan
 
 
 def test_the_api_key_never_reaches_stdout(etherscan, logger, capsys):
-    # The URLs carry ETHERSCAN_API_KEY as a query parameter and used to be
-    # print()ed on every call, which put the key in plain text into
-    # `docker logs`. This is the regression guard for that.
-    #
-    # NOTE what this does NOT cover: the mock here never raises, so this is the
-    # happy path only — and the happy path was never where the key escaped after
-    # the print() was removed. The test below is the one about the real leak.
+    # The URLs carry ETHERSCAN_API_KEY as a query parameter and must not be
+    # printed. Happy path only; the test below covers network errors.
     etherscan({"status": "1", "result": "1000000000000000000"})
     check_balance("0xabc", 1, API_KEY, "eth", logger, 18)
     captured = capsys.readouterr()
@@ -302,16 +275,9 @@ def test_the_api_key_never_reaches_stdout(etherscan, logger, capsys):
 def test_a_network_error_does_not_carry_the_api_key_out_of_here(monkeypatch, logger, token):
     """The real leak: `requests` hands the whole URL back inside its exceptions.
 
-    Not a contrived string — this is the shape of the message urllib3 produces for
-    every proxy/connection failure, and both URLs this module builds carry
-    ETHERSCAN_API_KEY as a query parameter. So a module that logs no URL at all
-    still writes the key to `docker logs` the moment it logs `{e}` — and, through
-    the caller, into the wallet's `Comment` cell in a Grist document that people
-    open, share by link and back up.
-
-    Both exits from this function are checked, because they go to different
-    places: the log line ends up in `docker logs`, and the text of the raised
-    exception is what `src/checker.py` writes into Grist.
+    The shape urllib3 produces for proxy/connection failures. Both exits are
+    checked: the log line (`docker logs`) and the raised text (written to Grist by
+    `src/checker.py`).
     """
     def exploding_get(url, timeout=None):
         raise requests.exceptions.ConnectionError(
@@ -337,21 +303,12 @@ def test_the_unredacted_original_is_not_left_chained_to_what_is_raised(monkeypat
                                                                       token):
     """The other half of the same leak: the exception CHAIN, not the message.
 
-    The `raise` that wraps the failure runs inside an `except`, so python
-    implicitly attaches the original — the untouched `ConnectionError` whose text
-    carries the api key in the URL — as `__context__`. `str(e)` never shows it,
-    which is why a test written against `str(e)` is green by construction; the
-    full chain is what `traceback.format_exc()`, `logger.error(...,
-    exc_info=True)` and an unhandled exit to stderr all render, and `docker logs`
-    is where those land.
-
-    So this asserts against the rendered chain, and only against that.
+    The wrapping `raise` runs inside an `except`, so python would attach the
+    unredacted original as `__context__`. `str(e)` cannot see it, so this asserts
+    against the rendered chain.
     """
-    # Bound to a name rather than written inline, and that is not style: a
-    # traceback quotes the SOURCE LINE of every frame it walks, so a literal on
-    # the call line below would appear in the render on its own account and fail
-    # this test no matter what the code does. Production has no such literal —
-    # the key arrives from `settings.etherscan_api_key`.
+    # Bound to a name: a traceback quotes each frame's source line, so a literal
+    # on the call line would appear in the render on its own.
     key = API_KEY
 
     def exploding_get(url, timeout=None):

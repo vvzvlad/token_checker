@@ -1,20 +1,13 @@
 """The main loop: what it reads, what it writes, and the health flag it hangs on.
 
-`src/checker.py` is the one module the refactor put NEW code into, and it is the
-one place where a mistake is not a wrong number in a cell but a wrong number
-written OVER a right one. Three things are pinned here and none of them is
-cosmetic:
+Three things are pinned here:
 
-* the four `set_health()` calls. The deployment acts on that flag twice over —
-  auto-heal restarts a container docker calls unhealthy, auto-update rolls an
-  image back that never reaches healthy — so a missing one is a restart loop on a
-  service that works, and a spurious one hides a service that does not;
-* the names `Wallets` / `Settings` / `Chains` and `Chain` / `Token` / `Divider`.
-  They are somebody else's document's names. Renaming one here renames nothing
-  there and simply stops the loop;
-* that a failure reading Grist can never write to the wallet of a PREVIOUS
-  iteration. That defect corrupted data rather than losing it, which is the kind
-  nobody notices.
+* the four `set_health()` calls: auto-heal and the auto-update rollback act on
+  the flag, so a missing one restarts a working service and a spurious one hides
+  a broken one;
+* the names `Wallets` / `Settings` / `Chains` and `Chain` / `Token` / `Divider`,
+  which belong to somebody else's document;
+* that a failure reading Grist never writes to the previous iteration's wallet.
 
 The loop is driven with every collaborator replaced (see the `loop` fixture) and
 stopped by a `StopLoop` raised from one of them: `run()` has no exit of its own.
@@ -278,12 +271,8 @@ def test_a_failed_balance_call_puts_the_health_flag_back(loop, health_flag):
 def test_the_reason_is_logged_even_when_grist_cannot_be_written_to(loop, health_flag):
     """The inner handler logs BEFORE it writes, and the order is the finding.
 
-    `grist.update` is a network call, and errors arriving in a batch is exactly
-    the situation where Grist itself is the thing that is down. With the write
-    first, its failure leaves the inner handler for the outer one, the log line
-    never runs, and the only surviving record of the iteration is "Grist is
-    unreachable" — the reason the balance check failed reached neither the cell
-    (the write failed) nor the log (it never happened), and is lost outright.
+    If Grist is down, `grist.update` raises to the outer handler; logging first
+    keeps the balance-check reason.
     """
     loop.wallets = [Wallet(1, Address="0xabc", Value="")]
     loop.balances = [RuntimeError("etherscan said no")]
@@ -303,12 +292,9 @@ def test_the_reason_is_logged_even_when_grist_cannot_be_written_to(loop, health_
 def test_a_failure_outside_the_wallet_step_puts_the_health_flag_back(loop, health_flag):
     """The outer handler's own set_health(True), and why it is not redundant.
 
-    Something CAN lower the flag in the middle of an iteration that never reaches
-    the balance call: the watchdog thread, which sets it False on its own account
-    below 60 s remaining. If that iteration then fails on a Grist call, this
-    handler is what puts the flag back — without it the service answers 503
-    through the ten-second sleep and recovers only at the top of the next
-    iteration, and that window is exactly what auto-heal watches.
+    The watchdog thread can lower the flag mid-iteration (below 60 s remaining).
+    If that iteration fails on a Grist call, this handler puts it back; otherwise
+    /health would answer 503 through the ten-second sleep.
 
     The fake below stands in for the watchdog thread; the real one would need a
     five-minute countdown to reach the same state. Asserted at the sleep, which is
@@ -325,14 +311,10 @@ def test_a_failure_outside_the_wallet_step_puts_the_health_flag_back(loop, healt
 
 
 def test_an_idle_iteration_puts_the_health_flag_back(loop, health_flag):
-    """The branch that used to leave the flag down forever.
+    """The idle branch must raise a flag the watchdog lowered.
 
-    "All wallets have values" is where a settled deployment spends all of its
-    time, and it passes through neither the balance call nor either handler. So a
-    flag the watchdog had lowered (it does that below 60 s remaining) stayed
-    False for the rest of the process's life once the loop recovered into this
-    branch: /health answers 503, docker marks the container unhealthy, auto-heal
-    restarts it, and the fresh process settles into exactly the same state.
+    "All wallets have values" is where a settled deployment spends its time, and
+    it passes through neither the balance call nor either handler.
     """
     HealthCheckHandler.set_health(False)
     loop.wallets = [None]
@@ -347,18 +329,9 @@ def test_a_failed_grist_read_never_writes_to_the_previous_wallet(loop, health_fl
     """Two iterations. The second one cannot read Grist. The first one's wallet is
     NOT allowed to be touched.
 
-    `none_value_wallet` is a local of `run()` while the `while True` is inside
-    `run()`, so the binding outlives the iteration. With the Grist read under the
-    inner handler, a transient read failure — a 502 from the API, a dropped
-    connection, anything — sent that handler to
-    `grist.update(NODES_TABLE, none_value_wallet.id, {"Value": "--", ...})` still holding the
-    PREVIOUS wallet, and the write succeeded: a balance computed correctly seconds
-    earlier was replaced by "--" and an error message about a failure that had
-    nothing to do with that wallet. Silent, and indistinguishable afterwards from
-    a wallet that genuinely failed.
-
-    The fix is that the read lives in the outer `try`, whose handler only logs and
-    sleeps. This test is the reason it may not move back.
+    `none_value_wallet` outlives the iteration. The read lives in the outer
+    `try`, whose handler only logs and sleeps; under the inner handler a read
+    failure would overwrite the previous wallet's correct value with "--".
     """
     loop.wallets = [
         Wallet(1, Address="0xabc", Value=""),      # iteration 1: processed fine
@@ -406,12 +379,9 @@ def test_neither_handler_writes_a_credential_into_grist_or_the_log(loop, health_
 def test_the_etherscan_key_never_reaches_the_grist_comment(loop, health_flag, monkeypatch):
     """The end of the leak path, through the REAL `check_balance`.
 
-    `requests` puts the full request URL into the text of any transport error, and
-    that URL carries ETHERSCAN_API_KEY as a query parameter. The caller writes the
-    text of that exception into the wallet's `Comment` cell — a Grist document
-    that people open, share by link and put into backups — and into `docker logs`
-    on the way. Both destinations are checked here, against the key the process is
-    actually configured with.
+    `requests` quotes the URL, with ETHERSCAN_API_KEY, in transport errors. Both
+    destinations (the `Comment` cell and the log) are checked against the
+    configured key.
     """
     key = src.checker.settings.etherscan_api_key
     assert key, "the suite's own conftest is supposed to configure one"

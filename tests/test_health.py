@@ -1,10 +1,7 @@
 """The /health endpoint's three answers.
 
-This is the contract our Portainer build acts on twice over: auto-heal restarts a
-container docker calls `unhealthy`, and auto-update waits for `healthy` after it
-recreates one before it accepts the new image instead of rolling it back. So a
-change to a status code here is a change to how the deployment behaves, not a
-cosmetic one.
+Auto-heal and the auto-update rollback gate act on these answers, so a status
+code change here changes how the deployment behaves.
 
 The handler is exercised without a socket: `BaseHTTPRequestHandler.__init__`
 would read a real connection, so a subclass bypasses it and records what the

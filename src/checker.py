@@ -69,19 +69,12 @@ def parse_divider(divider, logger):
 def safe_text(error):
     """The text of `error` with every credential this process holds removed.
 
-    Anything that reaches a log line or a Grist cell goes through here. The three
-    values passed are this process's three credentials — the Etherscan key, the
-    Grist key, the Telegram bot token. Only the Etherscan one actually travels
-    from here (it is a query parameter of the URL `requests` quotes back inside
-    its own exceptions, see `src/redact.py`), but the other two are listed
-    because the rule worth keeping is "no credential value ever leaves the
-    process", not "not this one".
+    Anything that reaches a log line or a Grist cell goes through here, with all
+    three credentials of this process (Etherscan key, Grist key, Telegram bot
+    token): no credential value ever leaves the process.
 
-    `telegram_chat_id` is deliberately NOT in the set — here or in any other
-    caller. It is the addressee, not a credential: it does not appear in the text
-    of these errors at all, so replacing it hides nothing, while blind replacement
-    of a short numeric identifier is how `***` ends up in the middle of a request
-    id or a timestamp. All cost, no benefit.
+    `telegram_chat_id` is not a credential and is never redacted: blind
+    replacement of a short number would put `***` inside ids and timestamps.
     """
     return redact(error, settings.etherscan_api_key, settings.grist_api_key,
                   settings.telegram_bot_token)
@@ -130,14 +123,10 @@ def run():
     while True:
         try:
             watchdog.reset_timeout()
-            # An iteration has begun, so the service is by definition making
-            # progress: put the health flag back up. Every other branch below
-            # either never lowers it or raises it again — except the "nothing to
-            # do" one, and that is the branch a settled deployment spends all its
-            # time in. Without this line a flag the watchdog lowered once (it
-            # lowers it below 60 s remaining) would stay down FOREVER after the
-            # loop recovered: /health answers 503, docker calls the container
-            # unhealthy, and auto-heal restarts a service that is working.
+            # An iteration has begun, so the service is making progress. Without
+            # this, a flag the watchdog lowered (below 60 s remaining) would stay
+            # down in the idle "nothing to do" branch, and auto-heal would restart
+            # a working service.
             HealthCheckHandler.set_health(True)
             chain = setting(grist, "Chain")
             chain_id = find_chain(grist, chain, CHAINS_TABLE)
@@ -167,21 +156,11 @@ def run():
                 grist.update(NODES_TABLE, none_value_wallet.id, {"Value": value, "Comment": msg})
             except Exception as e:
                 HealthCheckHandler.set_health(True)
-                # "--" rather than an empty cell: an empty `Value` is what marks a
-                # wallet as due, so writing nothing here would put this wallet
-                # straight back at the head of the queue and the loop would spin
-                # on it forever. Everything this handler can catch happened WHILE
-                # working on `none_value_wallet` — that is the whole reason the
-                # wallet lookup above is not inside this `try` — so the wallet
-                # named here is always the one the message is about.
+                # "--" rather than an empty cell: an empty `Value` marks a wallet
+                # as due, and the loop would spin on it forever.
                 reason = safe_text(e)
-                # LOGGED BEFORE IT IS WRITTEN, and that order is the whole point:
-                # `grist.update` is itself a network call, and the moment errors
-                # come in a batch is exactly the moment Grist is the thing that
-                # is down. With the write first, its own failure jumps to the
-                # outer handler, this line never runs, and the only thing anybody
-                # ever sees is "Grist is unreachable" — the reason the balance
-                # check failed reaches neither the cell nor the log and is gone.
+                # Logged before the write: if Grist is down, `grist.update` raises
+                # to the outer handler and the reason would otherwise be lost.
                 logger.error(f"Error occurred: {reason}")
                 grist.update(NODES_TABLE, none_value_wallet.id,
                              {"Value": "--", "Comment": f"Error: {reason}"})
