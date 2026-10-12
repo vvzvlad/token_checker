@@ -13,7 +13,7 @@
 # effects were a bigger image and a bigger surface to keep pinned.
 
 # `src/checker.py` talks to Grist through it; without it the loop never starts.
-grist-client @ https://gitea.vvzvlad.xyz/api/packages/projects/pypi/files/grist-client/0.1.0/grist_client-0.1.0-py3-none-any.whl
+grist-client @ https://gitea.vvzvlad.xyz/api/packages/projects/pypi/files/grist-client/0.1.1/grist_client-0.1.1-py3-none-any.whl
 
 # `src/balances.py` and `src/watchdog.py` call requests directly — no Etherscan
 # lookup and no Telegram notification without it.
