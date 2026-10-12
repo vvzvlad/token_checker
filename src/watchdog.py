@@ -24,38 +24,25 @@ from src.redact import redact
 WATCHDOG_TIMEOUT = 300
 WATCHDOG_STEP = 10
 
-# With less than this left, /health starts answering 503. The point is to give the
-# deployment's auto-heal a chance to restart the container BEFORE the watchdog has
-# to take the process down itself — a restart driven by docker's health verdict is
-# visible in `docker inspect`, an os._exit() is only visible in the log.
+# With less than this left, /health answers 503, giving auto-heal a chance to
+# restart the container (visible in `docker inspect`) before os._exit() does.
 UNHEALTHY_BELOW = 60
 
 # The notification is a courtesy on the way out, not a step that may delay the
 # exit: at this point the process is already committed to dying.
 TELEGRAM_TIMEOUT = 10
 
-# How much of a refused answer's body goes into the log line. Long enough to
-# recognise what answered — an envelope without `ok`, a gateway's own JSON error
-# page — short enough that a body somebody else chose the size of cannot push the
-# rest of the log out of the reader's screen.
+# How much of a refused answer's body goes into the log line: enough to recognise
+# what answered, bounded because the body's size is someone else's choice.
 BODY_EXCERPT_LIMIT = 200
 
 
 def _body_excerpt(payload, limit=BODY_EXCERPT_LIMIT):
     """`payload` rendered for one log line, bounded, for ANY decoded JSON value.
 
-    Total on purpose, because of WHERE it runs: this is on the path to
-    `os._exit(1)`, in the branch that reports a refusal, and a renderer that threw
-    would replace the explanation with a second failure. `response.json()` returns
-    whatever the body decoded to — an object, a list, a string, a number, `null` —
-    not the dict the Bot API documents, so nothing here may index, `.get()` or
-    assume a length. `repr` is defined for every one of those and slicing a string
-    is defined for every length, which is the whole of the implementation.
-
-    `repr` rather than `str` for the same reason it is total: a body that decoded
-    to `""` or to `"   "` shows up as `''` and `'   '` rather than as nothing at
-    all, and the failure this excerpt exists to end is precisely a log line that
-    reads as though the code had nothing to say.
+    Total on purpose: it runs on the path to `os._exit(1)`, and `response.json()`
+    may return any JSON value, so nothing here indexes or assumes a dict. `repr`
+    so an empty or blank string body is still visible.
     """
     text = repr(payload)
     return text if len(text) <= limit else text[:limit] + "..."
@@ -79,10 +66,8 @@ class GristWatchdog:
     def start(self):
         """Start the countdown thread.
 
-        Deliberately separate from `__init__`: constructing the object and
-        spawning a thread that can call `os._exit()` are two different things, and
-        the tests exercise the countdown by calling `tick()` directly rather than
-        by racing a real thread.
+        Separate from `__init__` so tests can drive the countdown with `tick()`
+        instead of a real thread that can call `os._exit()`.
         """
         self._thread = threading.Thread(target=self.decrease_timeout_thread, daemon=True)
         self._thread.start()
@@ -97,66 +82,19 @@ class GristWatchdog:
                     "chat_id": self.telegram_chat_id,
                     "text": message
                 }, timeout=TELEGRAM_TIMEOUT)
-                # The answer is CHECKED — status AND body — because the failure
-                # most likely to happen here does not raise. A bot token that no
-                # longer authenticates — rotated, revoked, or still carrying the
-                # whitespace it arrived with (see `OptionalSecret` in
-                # src/settings.py) — is a completely successful HTTP round trip
-                # that carries a rejection, 4xx rather than a raised exception; so
-                # is a chat id this bot cannot post to. `requests` returns both
-                # like any other response, so throwing the result away and logging
-                # "sent" below was a claim of delivery with nothing behind it — in
-                # the one log line guaranteed to be read, written as the watchdog
-                # takes the container down.
-                #
-                # Raised rather than branched, so the failure lands in the handler
-                # below that ALREADY redacts and already guarantees nothing escapes
-                # this method: `raise_for_status()` builds its message out of the
-                # URL ("401 Client Error: Unauthorized for url:
-                # https://api.telegram.org/bot<token>/sendMessage"), so it carries
-                # the bot token exactly the way a transport error does.
+                # The answer is checked (status and body): a bad token or chat id
+                # is a normal 4xx response, not an exception. Raised so the handler
+                # below redacts it: `raise_for_status()` quotes the URL, bot token
+                # included.
                 response.raise_for_status()
-                # The status alone is ALMOST enough — the Bot API mirrors its
-                # error_code into the HTTP status, so the two normally agree — and
-                # "almost" is why the body is read too. `ok` is the field the API
-                # documents as the verdict; the status is a convenience on top of
-                # it. Anything that answers 200 while the envelope says no (an
-                # intercepting proxy, a gateway with its own error page, a future
-                # partial-success shape) would otherwise be written into the log as
-                # a delivery, and this is the log line the operator reads to decide
-                # whether anybody was told the container died.
-                #
-                # Both `.json()` on a non-JSON body and this `raise` are new ways
-                # for the block to throw, which is exactly why they sit inside the
-                # same `try`: see the handler's note — this method runs on the way
-                # to os._exit(1) and may not raise at all.
+                # `ok` is the API's documented verdict; a 200 whose envelope says
+                # no (a proxy or gateway page) must not be logged as delivered.
+                # Inside the `try` because this method may not raise.
                 payload = response.json()
                 if not (isinstance(payload, dict) and payload.get("ok")):
-                    # The STATUS and an EXCERPT OF THE BODY, both, because between
-                    # them they are the whole of what this branch knows and either
-                    # one alone leaves the operator guessing.
-                    #
-                    # It used to report `payload.get("description")` and nothing
-                    # else. That is the API's own wording for a refusal ("chat not
-                    # found", "bot was blocked by the user"), it is the most useful
-                    # thing in the body when it is there, and it survives inside the
-                    # excerpt — but it is present only in an answer the Bot API
-                    # itself wrote. The answers that get HERE are largely the ones
-                    # it did not: a 200 whose envelope has no `ok` at all, a
-                    # refusal with no `description` field. Both rendered the line as
-                    # "Telegram refused the notification: None", which names neither
-                    # the status nor what arrived — in the single log line written
-                    # while the watchdog takes the container down, and about exactly
-                    # the intercepting proxy / gateway case the body is read for.
-                    #
-                    # The status is in the text rather than left to the reader
-                    # because `raise_for_status()` did NOT fire on these: reaching
-                    # this line means 2xx, and "refused" under a success code is the
-                    # part that needs saying out loud.
-                    #
-                    # None of this is about the token — the body is the API's
-                    # message about the addressee — and it goes through `redact()`
-                    # in the handler regardless.
+                    # Status and a body excerpt: answers reaching here often lack
+                    # `description`, and the status (2xx) shows "refused under a
+                    # success code". Redacted in the handler regardless.
                     raise RuntimeError(
                         "Telegram refused the notification: HTTP {}, body: {}".format(
                             response.status_code, _body_excerpt(payload)))
@@ -164,25 +102,10 @@ class GristWatchdog:
             else:
                 self.logger.warning("Telegram notification skipped - missing bot token or chat ID")
         except Exception as e:
-            # A failed notification must never be the reason the process survives a
-            # watchdog timeout: this runs on the path to os._exit(). Everything
-            # above sits inside the `try` for that reason, the status and body
-            # checks included — each is a new way for this method to raise, and
-            # this method may not raise at all.
-            #
-            # The type is named separately and the text is redacted, because the
-            # URL above carries TELEGRAM_BOT_TOKEN as a PATH SEGMENT and both
-            # `requests` and `raise_for_status()` quote the whole url back inside
-            # the text of the error ("Max retries exceeded with url:
-            # /bot<token>/sendMessage"). This is also the single log line most
-            # likely to be read: it is written at the moment the watchdog fires.
-            #
-            # Only the token is redacted. The chat id used to be passed here too
-            # and is not a credential: it is the addressee, it does not appear in
-            # any of these texts, and blind-replacing a short numeric identifier
-            # can only damage the message — cutting a matching run of digits out of
-            # a request id, a status code or a timestamp. Nothing is bought for
-            # that, so it is not done.
+            # This runs on the path to os._exit(), so it must never raise. The text
+            # is redacted because the URL carries TELEGRAM_BOT_TOKEN as a path
+            # segment and `requests` quotes it. The chat id is not a credential and
+            # is not redacted.
             self.logger.error("Failed to send Telegram notification: {}: {}".format(
                 type(e).__name__, redact(e, self.telegram_bot_token)))
 
@@ -205,13 +128,8 @@ class GristWatchdog:
     def _die(self):
         """Take the WHOLE PROCESS down, not just this thread.
 
-        This is the bug this module was fixed for. `sys.exit(1)` raises SystemExit
-        in the calling thread and nothing else: in a non-main thread it kills that
-        thread quietly, the process carries on running, and the watchdog simply
-        ceases to exist — while its own log line says it fired. The container then
-        stays up forever with no dead-man switch at all, which is the exact state
-        the watchdog exists to prevent. `os._exit()` is what actually ends the
-        process from a background thread.
+        `sys.exit(1)` in a non-main thread only ends that thread; `os._exit()` ends
+        the process.
         """
         reason = (f"Watchdog timeout reached. No activity detected for {self._timeout} "
                   f"seconds. Restarting application...")
@@ -219,12 +137,8 @@ class GristWatchdog:
         self.send_telegram_notification(
             f"Watchdog timeout reached. No activity detected for {self._timeout} seconds. "
             f"Application will be restarted.")
-        # os._exit() skips every exit hook AND the interpreter's own buffer flush,
-        # so without this the reason above can die inside a buffer and the
-        # container's log shows a process that vanished for no stated cause. The
-        # Dockerfile sets PYTHONUNBUFFERED=1 for the same reason; this covers the
-        # runs that do not have it (a hand-run `python main.py`) and the logging
-        # handlers' own buffering, which PYTHONUNBUFFERED does not touch.
+        # os._exit() skips exit hooks and buffer flushes. PYTHONUNBUFFERED in the
+        # Dockerfile does not cover hand runs or the logging handlers' buffers.
         for handler in list(getattr(self.logger, "handlers", ())):
             try:
                 handler.flush()

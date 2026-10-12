@@ -125,17 +125,8 @@ def test_each_credential_is_mandatory(monkeypatch, missing):
 @pytest.mark.parametrize("value", ["", " ", " \t\n "])
 @pytest.mark.parametrize("blank", REQUIRED_VARS)
 def test_a_required_variable_may_not_be_empty(monkeypatch, blank, value):
-    # "Declared but empty" is a real accident — `GRIST_SERVER=` left in the stack's
-    # `environment:` block, a secret that resolved to nothing — and a bare `str`
-    # accepts it. The empty string then travels into the client exactly like the
-    # `None` this module exists to stop, only quieter: the container starts,
-    # reports healthy, and fails on its first call with an error nobody connects
-    # to a missing variable.
-    #
-    # The whitespace cases are the same accident wearing a disguise, and
-    # `min_length=1` alone lets both through: one stray space after the `=`, or a
-    # secret that rendered to a newline, produces a value that is "set" by every
-    # test the container can make and behaves exactly like the empty string.
+    # `GRIST_SERVER=` or a lone space/newline must fail at startup, not on the
+    # first Grist call; `min_length=1` alone accepts the whitespace cases.
     _fill_required(monkeypatch)
     monkeypatch.setenv(blank, value)
     with pytest.raises(ValidationError):
@@ -146,23 +137,9 @@ def test_a_required_variable_may_not_be_empty(monkeypatch, blank, value):
 def test_a_credential_below_the_redaction_floor_is_rejected(monkeypatch, name):
     """The floor is `redact()`'s own, and this is what makes it more than a habit.
 
-    `redact()` leaves anything shorter than `MIN_SECRET_LENGTH` in the text
-    untouched. A key below that is therefore a key that travels into `docker logs`
-    and into the wallet's `Comment` cell in full, for the life of the deployment,
-    with nothing anywhere reporting it — `min_length=1` accepts it and the
-    redaction simply declines. Refusing it at startup is the only moment anybody
-    can be told.
-
-    Parametrised over all THREE credentials, `TELEGRAM_BOT_TOKEN` included. It
-    used to sit on the bare `Stripped` alias, which has no floor at all, so an
-    eight-character bot token was accepted at startup and `raise_for_status()`
-    then quoted it back into the log in full — the one credential the rule was
-    supposed to cover least well of the three, given that it is the one travelling
-    as a path segment of a URL that gets quoted back verbatim.
-
-    Written against the imported constant rather than against 8, because the two
-    have to move as one: raising the threshold in src/redact.py must not be able
-    to leave a credential stranded underneath it.
+    `redact()` leaves anything shorter than `MIN_SECRET_LENGTH` in place, so a
+    shorter key would leak. Parametrised over all three credentials, and written
+    against the imported constant so the two move together.
     """
     _fill_required(monkeypatch)
     monkeypatch.setenv(name, "x" * (MIN_SECRET_LENGTH - 1))
@@ -203,18 +180,9 @@ def test_padding_is_stripped_off_a_value_that_is_kept(monkeypatch):
 def test_padding_is_stripped_off_the_optional_variables_too(monkeypatch, pad_left, pad_right):
     """The optional pair is stripped exactly like the required four.
 
-    It was not, and the consequence is quiet rather than loud, which is what makes
-    it worth pinning. An unstripped `TELEGRAM_BOT_TOKEN` goes into an f-string URL
-    in `src/watchdog.py` and NOTHING on the way objects: measured against the
-    pinned requests 2.32.3 / urllib3 2.2.2, the padding is percent-encoded into
-    the path (`/bot<token>%0A/sendMessage`), the request is sent for real, and no
-    exception is raised at any layer. What arrives at the API is a token that is
-    not the token, so the call comes back rejected rather than delivered.
-
-    So the loss is a notification that never happened, at the one moment it exists
-    for: the watchdog is firing and the process is about to `os._exit(1)`.
-    Stripping is what stops the padded value from being sent; `src/watchdog.py`
-    checking the response is what stops a rejected one from being logged as sent.
+    A padded `TELEGRAM_BOT_TOKEN` is percent-encoded into the URL path
+    (`/bot<token>%0A/sendMessage`) and silently rejected by the API, losing the
+    watchdog's notification.
     """
     _fill_required(monkeypatch)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", pad_left + BOT_TOKEN + pad_right)
@@ -228,17 +196,9 @@ def test_padding_is_stripped_off_the_optional_variables_too(monkeypatch, pad_lef
 def test_a_blank_optional_variable_reads_as_not_configured(monkeypatch, value):
     """Blank means ABSENT, and this is the half that lets the token carry a floor.
 
-    Deliberately NOT a validation error, unlike the required four: the optional
-    pair is allowed to be missing, and `TELEGRAM_BOT_TOKEN=` left in the stack's
-    `environment:` block — with or without a stray space after the `=` — is a
-    half-configured deployment this service supports on purpose.
-
-    `None` rather than merely falsy, because that is the mechanism rather than a
-    coincidence. The before-validator in src/settings.py collapses blank to
-    absence BEFORE any constraint runs, which is the only reason a `min_length`
-    can sit on `TELEGRAM_BOT_TOKEN` at all: without it the floor would reject the
-    empty value and turn a supported configuration into a container that refuses
-    to start — the objection that used to keep the token off the floor entirely.
+    Not a validation error: a blank `TELEGRAM_BOT_TOKEN=` is a supported
+    half-configured deployment. `None` specifically, because the before-validator
+    collapses blank to absence before the length floor runs.
     """
     _fill_required(monkeypatch)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", value)
@@ -250,10 +210,8 @@ def test_a_blank_optional_variable_reads_as_not_configured(monkeypatch, value):
 
 @pytest.mark.parametrize("value", ["", " "])
 def test_a_blank_bot_token_still_lets_the_container_start(capsys, monkeypatch, value):
-    # The end the previous test is a means to: the floor on the token may not cost
-    # a startup. Driven through `load_settings_or_exit`, which is what main.py
-    # actually runs, so a regression shows up as the exit(1) it would be in
-    # production rather than as a pydantic error object nobody sees.
+    # The floor on the token may not cost a startup. Driven through
+    # `load_settings_or_exit`, as main.py runs it.
     _fill_required(monkeypatch)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", value)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
@@ -265,14 +223,9 @@ def test_a_blank_bot_token_still_lets_the_container_start(capsys, monkeypatch, v
 def test_a_bot_token_too_short_to_redact_is_refused_by_name_at_startup(capsys, monkeypatch):
     """Set, but below the floor: the one case that must NOT be read as "absent".
 
-    This is the defect this alias was changed for. On the bare `Stripped` alias an
-    eight-character `TELEGRAM_BOT_TOKEN` started the container happily, and the
-    first failed notification put it in the log in full: `raise_for_status()`
-    builds its message out of the URL, the token is a path segment of that URL,
-    and `redact()` declines to replace anything below `MIN_SECRET_LENGTH`.
-
-    Naming the variable is the point of failing at all — the operator has to know
-    WHICH of the six to look at, and nothing may quote the value itself.
+    `raise_for_status()` quotes the URL, the token is a path segment of it, and
+    `redact()` skips anything below `MIN_SECRET_LENGTH`. The error must name the
+    variable without quoting the value.
     """
     short = "x" * (MIN_SECRET_LENGTH - 1)
     _fill_required(monkeypatch)
@@ -356,18 +309,9 @@ def test_a_whitespace_value_is_explained_rather_than_called_empty(capsys, monkey
 def test_a_parse_error_is_not_annotated_with_the_stripping_note(capsys, monkeypatch, value):
     """`HEALTH_PORT` fails to PARSE, and nothing about that was decided by stripping.
 
-    The note used to be hung on the whole `Invalid value(s)` block, so the operator
-    read an explanation about whitespace directly under an integer-parsing failure —
-    an annotation that contradicts the line it annotates is worse than none.
-
-    The second value is the case that moving the note onto its own line does not
-    fix, and it is the reason the condition asks what KIND of error this is rather
-    than what the input LOOKS like. `HEALTH_PORT="  "` — the same stray space after
-    the `=` that the note exists for, one variable over — is whitespace-only by
-    shape, so a shape-based test appended the note to "Input should be a valid
-    integer": a field with no string constraint, no emptiness check, and nothing
-    anywhere that "counts as empty". Both values here must come out unannotated,
-    and only the second one can tell the two conditions apart.
+    The second value, `HEALTH_PORT="  "`, is whitespace-only by shape, so it
+    tells a kind-based condition from a shape-based one: neither value may carry
+    the note.
     """
     _fill_required(monkeypatch)
     monkeypatch.setenv("HEALTH_PORT", value)
@@ -381,14 +325,9 @@ def test_a_parse_error_is_not_annotated_with_the_stripping_note(capsys, monkeypa
 def test_the_stripping_note_annotates_only_the_value_it_is_about(capsys, monkeypatch):
     """The MIXED failure, which is the case the per-entry note exists for.
 
-    One broken `environment:` block rarely breaks exactly one variable, and the
-    two single-variable tests above cannot tell a per-entry note from a per-block
-    one: with a single error, "somewhere in the output" and "on the right line"
-    are the same assertion. Here they are not. The note was computed per error and
-    printed once after the whole list, so `GRIST_SERVER=" "` next to
-    `HEALTH_PORT=notanumber` put the whitespace explanation underneath the
-    integer-parsing failure — the exact contradiction the note was moved off the
-    block to avoid, still present in the only shape that shows it.
+    With a single error a per-entry note and a per-block one look the same; with
+    `GRIST_SERVER=" "` next to `HEALTH_PORT=notanumber` the note must sit on the
+    GRIST_SERVER line only.
     """
     _fill_required(monkeypatch)
     monkeypatch.setenv("GRIST_SERVER", " ")
@@ -405,24 +344,13 @@ def test_the_stripping_note_annotates_only_the_value_it_is_about(capsys, monkeyp
 def test_the_exit_does_not_carry_the_raw_value_out_in_a_chained_traceback(capsys, monkeypatch):
     """The `from None` on the `SystemExit`, and why this handler needs it most.
 
-    This `raise` runs inside `except ValidationError`, so python attaches the
-    ValidationError as `__context__` — and pydantic renders every rejected field
-    as `input_value=<the value exactly as it arrived>`. For a credential that is
-    the live key, verbatim, and `load_settings_or_exit` cannot redact it: it is
-    generic over the settings class and does not know which fields are secret.
-
-    Nothing prints it today, because CPython renders no traceback for an unhandled
-    SystemExit. That is a property of one caller, not of this function, which the
-    module docstring offers to every entrypoint — and the first one that catches
-    SystemExit and logs it with `exc_info=True` renders the whole chain.
-
-    So this asserts against the rendered chain, which is the thing that leaks, and
-    against stderr, which must name the variable without quoting its value.
+    The ValidationError context renders rejected fields as
+    `input_value=<raw value>`, and this generic function cannot redact. Asserts
+    against the rendered chain and against stderr, which must name the variable
+    without quoting its value.
     """
-    # Bound to a name rather than written inline: a traceback quotes the SOURCE
-    # LINE of every frame it walks, so a literal on the call line below would show
-    # up in the render on its own account and fail this test regardless of what
-    # the code does.
+    # Bound to a name: a traceback quotes each frame's source line, so a literal
+    # on the call line would appear in the render on its own.
     raw = "9f3ab2"
     assert len(raw) < MIN_SECRET_LENGTH, "must be rejected for its LENGTH, not its shape"
     _fill_required(monkeypatch)

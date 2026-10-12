@@ -4,13 +4,8 @@
 
 Importing src.checker pulls in src.settings, so a missing or invalid environment
 variable exits here with a message naming it (see src/config_errors.py) before
-any work starts. The container is expected to DIE in that case: production runs
-it with `restart: unless-stopped`, which is what does the restarting.
-
-Deliberately thin, and deliberately the only thing the image's CMD runs: the old
-`CMD while true; do python token_checker.py; sleep 10; done` wrapper made that
-death invisible, because the shell outlived the program and kept the container
-looking alive.
+any work starts. The container is expected to die in that case; production's
+`restart: unless-stopped` restarts it.
 """
 
 from src.checker import run

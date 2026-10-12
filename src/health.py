@@ -1,11 +1,9 @@
 """The /health endpoint — the liveness signal the deployment acts on.
 
-The Dockerfile's HEALTHCHECK curls this endpoint, and our Portainer build reads
-docker's verdict twice over: auto-heal restarts a container docker reports
-`unhealthy`, and the auto-update rollback gate waits for `healthy` after it
-recreates the container. So what this handler answers is not a debug convenience
-— a 503 held for long enough is a restart, and a container that never reaches 200
-is an image that gets rolled back.
+The Dockerfile's HEALTHCHECK curls this endpoint. Auto-heal restarts a container
+docker reports `unhealthy`, and the auto-update rollback gate waits for `healthy`:
+a 503 held long enough is a restart, a container that never reaches 200 is rolled
+back.
 
 The three answers are a contract and are pinned by `tests/test_health.py`:
     GET /health, healthy    -> 200 {"status": "healthy"}
@@ -24,12 +22,8 @@ UNHEALTHY_REASON = "Request in progress taking too long"
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    # CLASS-level, not instance-level, and that is load-bearing: HTTPServer builds
-    # a fresh handler instance for every single request, so an instance attribute
-    # would be reset before it could ever be read. The consequence for tests is
-    # that this flag is process-wide mutable state shared by every test in the
-    # suite — tests/conftest.py asserts it is back to True before AND after each
-    # test for exactly that reason.
+    # Class-level: HTTPServer builds a new handler instance per request. It is
+    # process-wide state, so tests/conftest.py asserts it is True around each test.
     is_healthy = True
 
     @classmethod
@@ -63,11 +57,8 @@ def run_health_server(port):
 def start_health_server(port, logger):
     """Start the health server on a daemon thread and return it.
 
-    A daemon thread on purpose: it must never keep the process alive on its own.
-    The whole design of this service is that a fatal problem KILLS the container
-    and `restart: unless-stopped` restarts it, and a non-daemon HTTP thread would
-    turn that into a process that answers "healthy" while nothing else is left
-    running.
+    A daemon thread so it never keeps the process alive on its own: a fatal
+    problem must kill the container, not leave a process answering "healthy".
     """
     thread = threading.Thread(target=run_health_server, args=(port,), daemon=True)
     thread.start()

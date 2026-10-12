@@ -1,63 +1,27 @@
 """Smoke gate for the token_checker image, run on the CI runner against a built image.
 
-It sits BETWEEN `docker build` and `docker push` and is the last point at which a broken
-image can still be stopped: the `tokenchecker` container in the `crypt-common` stack on
-nebula carries `io.portainer.update.enable`, so what lands on `:latest` is what production
-ends up running, and nobody presses a button in between.
+It sits between `docker build` and `docker push`: production auto-updates from `:latest`.
+A plain `python3 ci/smoke.py` on the runner drives `docker` (run, exec, inspect, logs)
+against $SMOKE_IMAGE; nothing is imported from the application.
 
-It is a plain `python3 ci/smoke.py` on the runner that drives `docker` against the tag it is
-given in $SMOKE_IMAGE. Nothing here is imported from the application and nothing here needs
-the application's dependencies — the whole gate is `docker run`, `docker exec`,
-`docker inspect` and `docker logs`.
+The pytest suite (run before the build) covers the code; this covers the artefact:
 
-What this gate is for, and what it is NOT for
-----------------------------------------------
-The pytest suite runs in its own job before the image is built (`build` needs `test`), and
-it answers "does the code work" against a checkout with every collaborator mocked. What it
-cannot answer is whether the ARTEFACT carries that code, comes up on its own, and is
-packaged the way this repo says it is. Every check below is one of those:
-
-* (a) every python file the image ships READS and COMPILES under the image's own
-  interpreter. The suite runs on whatever python the test job has; this is the line that
-  goes red the day the code stops parsing on the version production actually runs;
-* (b) every THIRD-PARTY module those files import resolves inside the image, one at a time
-  and named, so a dropped requirement names itself instead of arriving as a stack trace out
-  of a program that got half-way through its first Grist call. The list is also compared
-  against what the image's own files import, so it cannot quietly stop covering a new one;
-* (c) every FIRST-PARTY module imports inside the image. `py_compile` cannot see a package
-  that was not COPYed, an `__init__.py` left behind, or an import that only resolves from
-  the repository root — importing can, and after a layout refactor that is exactly the
-  breakage worth fearing;
-* (d) PID 1 really is `python main.py`, running as a non-root uid. Since the CMD stopped
-  being a `while true` wrapper, the first half is also the liveness statement: a container
-  that is up IS the checker, not a shell that outlives it. The second half is the only
-  evidence that entrypoint.sh still drops privileges — nothing else in the pipeline would
-  notice an image that quietly went back to running as root;
-* (e) `.dockerignore` did its job: no tests, no ci, no `.env`, no `.venv` in the image;
-* (f) the program FAILS LOUDLY on missing configuration — a non-zero exit AND a message
-  naming what is missing. That is the specific defect this repository was fixed for, and
-  the old `while true` CMD is exactly what used to hide it;
+* (a) every shipped python file reads and compiles under the image's interpreter;
+* (b) every third-party module those files import resolves inside the image, one per row,
+  and the list is compared against what the shipped files actually import;
+* (c) every first-party module imports (catches a missing COPY or `__init__.py`);
+* (d) PID 1 is `python main.py` and does not run as root (entrypoint.sh dropped privileges);
+* (e) `.dockerignore` kept tests, ci, `.env` and `.venv` out of the image;
+* (f) missing configuration exits non-zero with a message naming what is missing;
 * (g) the /health endpoint answers `healthy` from inside the container;
-* (h) DOCKER's own health verdict reaches `healthy`. This is a DIFFERENT check from (g) and
-  the difference is the whole point: (g) speaks python to a socket, while the Dockerfile's
-  HEALTHCHECK shells out to `curl`. The base is `-slim` and does not ship `curl`, so it is
-  one explicit `apt-get install` line — tidy that line up, or lose the package to a Debian
-  change, and the endpoint answers perfectly while the probe fails forever. Our
-  Portainer build's auto-heal then restarts a healthy container every ~40 s, and auto-update
-  rolls back every good image for never reaching `healthy` in its window, with every other
-  check in this file still green.
+* (h) docker's own health verdict reaches `healthy`. Different from (g): the HEALTHCHECK
+  shells out to `curl`, which `-slim` lacks and is installed by one explicit apt line.
 
-Constraints of this runner, which shaped every choice below
-------------------------------------------------------------
-**This job and the docker daemon are not in the same network namespace.** Gitea's act_runner
-executes the job inside its own job container while the `docker` CLI it provides drives a
-daemon that lives outside it. So NO PORT IS PUBLISHED by anything in this file and nothing
-here talks to 127.0.0.1: a published port would land in the HOST daemon's namespace, not in
-this job's. Everything that has to be observed from inside a container is observed with
-`docker exec` — including check (g), whose HTTP request is made by a python one-liner
-running INSIDE the container, against that container's own loopback.
+The job and the docker daemon are not in the same network namespace (act_runner runs the
+job in its own container), so no port is published and nothing talks to 127.0.0.1;
+container internals, including the (g) HTTP request, are observed with `docker exec`.
 
-Two properties matter and are easy to lose, so they are stated where they can be checked:
+Two properties are easy to lose:
 
 * Failures leave through SystemExit, never `assert`. Asserts vanish under PYTHONOPTIMIZE=1,
   which would silently turn this gate permanently green.
@@ -74,24 +38,18 @@ import sys
 import time
 import traceback
 
-# The tag to test. Required rather than defaulted: a default would let a mistyped `env:`
-# block in a workflow silently gate some other image that happens to be on the daemon — and
-# a gate that grades the wrong artefact is worse than no gate, because it is green.
+# The tag to test. Required: a default could silently gate some other image on the daemon.
 IMAGE_ENV = "SMOKE_IMAGE"
-# Base name for every container this gate starts. Required for the same reason plus one
-# more: the runner has a single docker daemon shared by every repository, so two concurrent
-# runs must not collide on a container name. The workflows put the run id in it.
+# Base name for every container this gate starts; the workflows put the run id in it so
+# concurrent runs on the shared daemon do not collide.
 NAME_ENV = "SMOKE_NAME"
 
 # The two containers this gate starts, by suffix on $SMOKE_NAME:
 #   ""      the long-lived one, started with the image's REAL command and placeholder
 #           configuration. Checks (a) through (e), (g) and (h) all look at it.
 #   -guard  the short-lived one started with NO environment at all, for check (f).
-# Both are NAMED rather than left to docker's random name generator, and the reason is the
-# one case that matters: `subprocess` hitting its timeout kills the docker CLIENT on the
-# runner, not the container on the daemon. With no name nobody could ever remove the
-# survivor — not the `finally` here, not the workflow's `if: always()` step — and it would
-# go on pinning the image, so the `docker rmi` at the end of the job would fail too.
+# Both are named: a `subprocess` timeout kills the docker client, not the container, and
+# only a known name lets the `finally` here or the workflow's cleanup remove the survivor.
 # Kept in step with the suffix list in both workflows' cleanup steps.
 GUARD_SUFFIX = "-guard"
 
@@ -131,14 +89,10 @@ FIRST_PARTY_MODULES = (
     "src.checker",
 )
 
-# The distributions those files import. Declared here rather than derived, so the row count
-# is a property of this file — but NOT trusted: the sweep inside the image derives the same
-# list from the shipped sources' own syntax trees and one row compares the two. A new
-# third-party import that nobody added here therefore fails the gate instead of going
-# ungated, which is the failure mode a hand-maintained list normally has.
-# Deliberately derived from the CODE and not from requirements.txt: that file pins the
-# transitive closure too (certifi, idna, urllib3 ...), and gating on pins would check
-# packages this program never loads while missing the one it does.
+# The distributions those files import. Declared so the row count is stable, and compared
+# by one row against the list the in-image sweep derives from the shipped sources, so a new
+# import cannot go ungated. Based on the code, not requirements.txt (which pins the
+# transitive closure).
 THIRD_PARTY_MODULES = (
     "colorama",
     "grist_client",
@@ -169,14 +123,10 @@ CONFIG_VARS = ("GRIST_SERVER", "GRIST_DOC_ID", "GRIST_API_KEY", "ETHERSCAN_API_K
 # it, unlike a pydantic message which pydantic is free to reword.
 GUARD_FRAGMENT = "Missing required variable(s)"
 
-# PLACEHOLDER configuration for the long-lived container. Obviously fake and deliberately
-# unroutable: `.invalid` is reserved by RFC 2606 and can never resolve, so the loop's first
-# Grist call is refused locally and Etherscan is never reached because no wallet list ever
-# arrives. A gate that reddens when somebody else's service has an outage is a gate everybody
-# learns to ignore, and a gate that needs real keys cannot run on a pull request at all.
-# It has to be passed at all because the CMD is a direct `python main.py`: with a bare
-# environment the container exits within a second, which is the documented behaviour and
-# precisely what makes `docker exec` impossible. Check (f) builds the bare environment itself.
+# Placeholder configuration for the long-lived container. `.invalid` (RFC 2606) never
+# resolves, so the first Grist call fails locally and Etherscan is never reached. Needed
+# because the CMD is a direct `python main.py`, which exits at once on a bare environment;
+# check (f) builds the bare environment itself.
 SMOKE_ENV = [
     "GRIST_SERVER=http://grist.smoke.invalid",
     "GRIST_DOC_ID=smoke-not-a-real-doc-id",
@@ -184,34 +134,15 @@ SMOKE_ENV = [
     "ETHERSCAN_API_KEY=smoke-not-a-real-api-key",
 ]
 
-# HEALTH_PORT is deliberately NOT passed above, so this gate exercises the 8080 default in
-# src/settings.py — which is what production runs on, because the stack does not pass it
-# either, and it is the port the Dockerfile's HEALTHCHECK curls.
+# HEALTH_PORT is not passed, so this exercises the 8080 default production runs on.
 HEALTH_URL = "http://127.0.0.1:8080/health"
 HEALTH_STATUS = "healthy"
 
-# How many verdicts each probe below is REQUIRED to return, compared against what it
-# actually returned before anything is reported. Every probe returns exactly one row per
-# target on every path it can take — including the paths where the container could not be
-# started at all, which report every target as failed rather than returning nothing. So
-# these numbers are a property of the SOURCE, not of a particular run, and any run that
-# disagrees with them is a run in which a check went missing.
-#
-# What this defends against is this gate's own worst failure mode, and it is the one thing
-# no other check in the pipeline can catch: a probe that quietly stops probing. A check
-# dropped in a refactor, an early return that forgets to emit its rows, an `if ...: return []`
-# left behind after debugging — none of those print anything, none contribute a failure, and
-# the run still ends on `smoke ok: N/N targets`, because N is counted from the rows that
-# happened to arrive and therefore agrees with itself no matter how few there are.
-#
-# THE ONE WAY TO MISUSE THIS: when a mismatch fires, do NOT edit the number to match what
-# the run produced. The number is the claim; the run is the evidence that the claim has
-# become false. "Fixing" it that way turns the tripwire into a rubber stamp forever. The fix
-# is to work out WHICH probe stopped returning a verdict and why.
-#
-# MAINTENANCE CONTRACT: adding or removing a check means editing this constant IN THE SAME
-# COMMIT as the probe. Counts are derived from the source wherever a derivation exists, so
-# growing SHIPPED_FILES or EXCLUDED_PATHS cannot make them stale.
+# How many verdicts each probe is required to return, checked before anything is reported.
+# Every probe returns one row per target on every path (including failed rows when the
+# container could not start), so a mismatch means a check went missing. When it fires, find
+# the probe that stopped reporting; do not edit the number. Adding or removing a check edits
+# this constant in the same change. Counts are derived from the source where possible.
 EXPECTED_TARGETS = (
     ("(a) shipped files compile", len(SHIPPED_FILES)),
     ("(b) third-party imports", 1 + len(THIRD_PARTY_MODULES)),
@@ -223,10 +154,9 @@ EXPECTED_TARGETS = (
     ("(h) docker HEALTHCHECK verdict", 1),
 )
 
-# Bounds. Every docker call gets one, because a gate that hangs is worse than a gate that
-# fails: it holds a slot on a runner the whole fleet queues for until the step timeout kills
-# it, and a killed step never runs its own cleanup. Their worst-case SUM is what the smoke
-# step's `timeout-minutes` in both workflows has to exceed, in the order the calls happen:
+# Bounds. Every docker call gets one: a hung gate holds a shared runner slot and a killed
+# step skips its cleanup. Their worst-case sum must stay below the smoke step's
+# `timeout-minutes` in both workflows, in the order the calls happen:
 #     30 (rm guard)   +  90 (guard run, no environment)
 #   + 30 (rm probe)   +  60 (probe run -d, the image's own command)
 #   + 60 (the compile/import sweep, one exec over every shipped file)
@@ -240,9 +170,8 @@ EXPECTED_TARGETS = (
 #   + 30 (docker logs: the probe container's own output, taken before it is removed)
 #   + 30 (rm probe, finally) + 30 (rm guard, finally)
 #   = 1020 s, seventeen minutes. Both workflows allow 20.
-# Two of these `rm`s are PRE-run cleanups: each container is removed by name before it is
-# started, so a re-run from the Gitea UI — which keeps the same run id, hence the same
-# $SMOKE_NAME — cannot die on "name already in use".
+# Two `rm`s are pre-run cleanups: a UI re-run keeps the same run id, hence the same
+# $SMOKE_NAME, and would otherwise fail on "name already in use".
 INSPECT_TIMEOUT = 30
 REMOVE_TIMEOUT = 30
 LOGS_TIMEOUT = 30
@@ -252,13 +181,9 @@ EXEC_TIMEOUT = 30
 SWEEP_TIMEOUT = 60
 HEALTH_EXEC_TIMEOUT = 60
 
-# The health probe's own budget INSIDE the container, and the docker-health poll's budget on
-# the runner. The first is generous next to reality — the health thread is listening a few
-# hundred milliseconds into run(), because building the Grist client performs no network I/O.
-# The second comes from the healthcheck's own parameters rather than from a taste in round
-# numbers: `--start-period=10s` plus `--retries=3` at `--interval=10s` means a container that
-# does come up can take 10 + 3*10 = 40 s before its status settles, so 60 s is half again as
-# much slack, which a shared runner under load needs.
+# The health probe's budget inside the container (the server listens within a second), and
+# the docker-health poll's budget on the runner: start-period 10 s + 3 retries at 10 s = 40 s
+# to settle, plus slack for a loaded runner.
 HEALTH_BUDGET = 30
 DOCKER_HEALTH_BUDGET = 60
 DOCKER_HEALTH_PAUSE = 2
@@ -271,22 +196,15 @@ EXCERPT_CHARS = 4000
 # whoever reads the run, so they are different codes.
 EXIT_CHECKS_FAILED = 1
 EXIT_MISCONFIGURED = 2
-# A third code, for the EXPECTED_TARGETS self-check finding that a probe returned fewer (or
-# more) verdicts than it declares — and for an unhandled exception, which is the same
-# statement: a gate that crashed did not grade the image either. Deliberately NOT folded
-# into EXIT_CHECKS_FAILED, because the two demand opposite reactions. A 1 means "this image
-# is broken, do not ship it"; a 3 means "this gate has been lying, find out since when", and
-# that question is about every image that already went out while a check was not running.
+# The gate itself is wrong: the EXPECTED_TARGETS self-check failed, or an unhandled
+# exception. Separate from EXIT_CHECKS_FAILED ("this image is broken") because it means
+# earlier images may have been graded by a gate that was not checking.
 EXIT_SELF_CHECK = 3
 
 # Fed to the image's own python, with the shipped paths as positional arguments. It answers
-# three questions in ONE exec — can each file be read, does it compile under THIS
-# interpreter, and what third-party names do they all import between them — because they
-# share the same file reads and splitting them would triple the docker round-trips for
-# nothing. Output is one line per verdict, parsed on the runner.
-# It is pure stdlib on purpose: the only third-party imports this gate ever performs are the
-# ones it is GATING, one at a time and by name further down. Anything imported here would be
-# a library that fails at the gate instead of at the thing being gated.
+# three questions in one exec (readable, compiles under this interpreter, third-party
+# imports) since they share the file reads. One output line per verdict, parsed on the
+# runner. Pure stdlib: the only third-party imports are the gated ones, one at a time below.
 SWEEP_SCRIPT = r'''
 import ast, os, py_compile, sys, sysconfig, tempfile
 
@@ -459,12 +377,9 @@ def docker(args, timeout):
     Returns (status, output) with stderr folded into stdout, because everything here is read
     by a human out of a CI log where the interleaving is the useful part.
 
-    A status of None means the command produced NO EXIT CODE AT ALL — it ran out its
-    timeout, or docker is not on PATH — and `output` then explains which. That is
-    deliberately not the same thing as a non-zero exit and is never reported with the same
-    wording: "the container exited 1" is a finding about the image, while "the docker client
-    never came back" is a finding about the runner, and folding them together is how a broken
-    runner starts looking like a broken application.
+    A status of None means no exit code at all (timeout, or docker not on PATH) and
+    `output` says which; it is reported differently from a non-zero exit because it is a
+    finding about the runner, not the image.
     """
     argv = ["docker"] + args
     try:
@@ -491,15 +406,9 @@ def remove_container(name):
     check fails. A container that is already gone, or a docker that is momentarily unhappy,
     must not turn into a red verdict about the image.
 
-    `-v` is here even though this Dockerfile declares no `VOLUME` yet, and this is the
-    removal path where it matters MOST rather than a copy of the flag the workflows carry:
-    on every normal run it is THIS function that removes the long-lived container, so the
-    workflow's `if: always()` step finds nothing left and its own `-v` applies to nothing.
-    That step exists for the run where this process was killed by the smoke step's
-    `timeout-minutes` and never reached its `finally`. Both paths carry the flag; change one
-    and change the other. It cannot take anything else with it: `docker rm -v` removes only
-    the anonymous volumes belonging to that one container, never a named volume such as the
-    ones docker-compose creates.
+    `-v` removes that container's anonymous volumes (never named ones). This is the path
+    that removes containers on a normal run; the workflow's cleanup step carries the same
+    flag for runs killed before the `finally`. Change both together.
     """
     docker(["rm", "-f", "-v", name], REMOVE_TIMEOUT)
 
@@ -679,14 +588,8 @@ def parse_pid1_uid(status_text):
 def check_pid1(name, blocked=None):
     """(d) PID 1 is `python main.py`, and it is not root.
 
-    Both halves are about the same process and neither can be answered any other way.
-
-    The uid is read from /proc/1/status and NOT from `docker exec ... id -u`, and that is
-    the whole trick: `docker exec` does not go through the ENTRYPOINT and does not inherit
-    the gosu drop — it runs as the image's configured user, which here is root, because the
-    Dockerfile deliberately declares no USER. So an `id -u` in the exec'd shell prints 0 in
-    a perfectly healthy container and 0 in a broken one, and is worth nothing. The question
-    is about the process the entrypoint exec'd into, which is PID 1.
+    The uid is read from /proc/1/status, not `docker exec ... id -u`: exec bypasses the
+    ENTRYPOINT and runs as root (no USER directive) in a healthy container too.
     """
     cmd_target = "the container's PID 1 is `python {}`".format(ENTRY_SCRIPT)
     uid_target = "PID 1 does not run as root (the entrypoint dropped to uid {})".format(APP_UID)
@@ -711,10 +614,8 @@ def check_pid1(name, blocked=None):
         if not argv:
             rows.append((cmd_target, "/proc/1/cmdline is empty"))
         elif "python" not in os.path.basename(argv[0]):
-            # Since the CMD stopped being a `while true` shell wrapper, PID 1 is the
-            # interpreter itself. A shell here means the wrapper came back — and with it the
-            # failure-hiding restart loop it was removed for — or that an --entrypoint was
-            # passed.
+            # A shell here means a restart-loop wrapper in the CMD or an overridden
+            # entrypoint.
             rows.append((cmd_target, (
                 "PID 1 is {!r}, whose argv[0] is not a python interpreter — the CMD was "
                 "overridden, or the failure-hiding `while true` wrapper is back".format(
@@ -798,19 +699,9 @@ def check_excluded_paths(name, blocked=None):
 def check_missing_configuration_guard(image, name):
     """(f) The image refuses to start without its configuration, AND SAYS SO.
 
-    Started with NO environment at all — not one `-e` — which is the shape of the real
-    accident: a stack redeployed after somebody dropped a variable out of the compose file.
-
-    Three rows, because the exit code ALONE is worth very little. A typo in an import, a
-    wheel that failed to install, a syntax error in a module: every one of those also exits
-    non-zero with no environment set, and every one would let this check report success while
-    the guard it claims to be testing had quietly stopped existing. So the exit code is one
-    row and the two things the message has to contain are two more — the CLASS of the problem
-    and the NAMES of the variables.
-
-    With `restart: unless-stopped` in production the container is restarted either way, so
-    that message is the ONLY signal separating "somebody dropped a variable" from an image
-    that is simply broken.
+    Started with no environment at all. Three rows, because any broken image also exits
+    non-zero: the exit code, the class of the problem, and the variable names. The message
+    is the only signal separating a dropped variable from a broken image.
     """
     exit_target = "the image exits non-zero when started with no environment at all"
     class_target = "...and its output says {!r}".format(GUARD_FRAGMENT)
@@ -885,13 +776,8 @@ def check_health_endpoint(name, blocked=None):
 def check_docker_health(name, blocked=None):
     """(h) DOCKER's own verdict on the container reaches `healthy`.
 
-    A DIFFERENT check from (g), and the difference is the point: (g) speaks python to a
-    socket while the Dockerfile's HEALTHCHECK shells out to `curl`. The `-slim` base does
-    not ship `curl`, so it is one explicit `apt-get install` line — lose it to a tidy-up or
-    to a Debian change and the endpoint answers perfectly while the probe fails forever.
-    This is the verdict our Portainer build acts on in both directions: auto-heal
-    restarts a container docker calls `unhealthy`, and auto-update waits for `healthy` after
-    it recreates one before accepting the new image instead of rolling it back.
+    Different from (g): the HEALTHCHECK shells out to `curl`, installed explicitly on
+    `-slim`. This is the verdict auto-heal and the auto-update rollback gate act on.
     """
     target = "docker reports the container healthy within {} s".format(DOCKER_HEALTH_BUDGET)
 
@@ -1013,21 +899,9 @@ def main():
         health_rows = check_health_endpoint(probe_name, blocked=blocked)
         docker_health_rows = check_docker_health(probe_name, blocked=blocked)
 
-        # The APPLICATION's own output, and the fourth of the four docker commands this
-        # gate is built from. Taken HERE, before the `finally` below removes the container:
-        # `docker logs` against a container that has been removed has nothing left to
-        # return, so a few lines later is too late.
-        #
-        # The case it exists for is a long-lived container that started and then DIED. Every
-        # exec-based probe above then reports "docker exec failed", which is true, correctly
-        # red, and completely silent about WHY — the traceback that killed the program only
-        # ever existed in the container's log, and without this the gate sends whoever reads
-        # the run to reproduce it by hand. Skipped when the container never started at all:
-        # `docker run` already returned its reason and it is on every row.
-        #
-        # It contributes NO verdict. It is diagnostic output about rows that already failed,
-        # and an "is there a log" check would go red on a perfectly good image that simply
-        # has nothing to say.
+        # The application's own output, taken before the `finally` removes the container.
+        # It explains a container that started and died (exec probes only say "failed").
+        # Diagnostic only, no verdict; skipped when the container never started.
         if blocked is None:
             log_status, probe_log = docker(["logs", probe_name], LOGS_TIMEOUT)
             if log_status is None:
@@ -1039,29 +913,18 @@ def main():
         remove_container(probe_name)
         remove_container(guard_name)
 
-    # SAME ORDER AS EXPECTED_TARGETS, and that is a requirement rather than a convention: the
-    # pairing below is positional, so a group moved here without moving its declaration is
-    # compared against somebody else's count. Nothing in this file can detect a swap between
-    # two groups that return the same number of verdicts; keeping the two tuples in step by
-    # eye is what prevents it, which is why the letters are on the labels.
+    # Same order as EXPECTED_TARGETS: the pairing is positional, and a swap between two
+    # groups with equal counts is undetectable, hence the letters on the labels.
     produced = (shipped_rows, third_party_rows, first_party_rows, pid1_rows, excluded_rows,
                 guard_rows, health_rows, docker_health_rows)
 
-    # Three self-checks, and they are three because each catches a break the others cannot
-    # see. They are collected in two lists rather than one because they are REPORTED
-    # differently: `wiring` holds free-text findings about this file's own consistency, while
-    # `miscounted` holds one entry per disagreeing probe.
+    # Three self-checks, each catching a break the others cannot. `wiring` holds free-text
+    # findings about this file's consistency, `miscounted` one entry per disagreeing probe.
     wiring = []
 
-    # (1) SAME NUMBER OF PROBE GROUPS. Its own check, because the per-probe comparison below
-    # is structurally incapable of making it: `zip` stops at the shorter of its arguments and
-    # says nothing about the surplus. A refactor that DROPS a probe from `produced` — rather
-    # than leaving it in place returning [] — pairs the survivors against the first
-    # declarations, finds every one consistent, and reports `miscounted == []`.
-    # (`zip(..., strict=True)` would say this in one word and is deliberately not used: the
-    # runner's python3 is whatever the job image ships and is not pinned anywhere, and
-    # `strict` needs 3.10 — on an older interpreter this file would die with a TypeError
-    # before it graded anything.)
+    # (1) Same number of probe groups: `zip` below stops at the shorter argument, so a
+    # dropped probe would go unnoticed. Not `zip(strict=True)`, which needs 3.10, and the
+    # runner's python3 is not pinned.
     arity_agrees = len(produced) == len(EXPECTED_TARGETS)
     if not arity_agrees:
         wiring.append(
@@ -1156,17 +1019,10 @@ def main():
 
 
 if __name__ == "__main__":
-    # Every verdict this gate reaches leaves through SystemExit, and every one of those exit
-    # codes still means exactly what it says above: `except Exception` does not catch
-    # SystemExit, so 0, 1, 2 and the self-check's 3 all pass through untouched. What is
-    # caught is the OTHER way this script can end — an exception nobody planned for. CPython
-    # exits 1 on an unhandled traceback, i.e. would report a broken GATE as a broken IMAGE
-    # and send whoever reads the run to inspect an artefact that may be perfectly fine.
-    #
-    # The traceback is NOT swallowed: it is the only diagnostic there is for a failure nobody
-    # anticipated. stdout is block-buffered when it is a pipe — which it is on the runner —
-    # so it is flushed first, otherwise every row printed by main() would land in the log
-    # AFTER the traceback of the call that produced them.
+    # Verdicts leave through SystemExit, which `except Exception` does not catch. An
+    # unplanned exception would otherwise exit 1, the "image is broken" code, so it is
+    # mapped to the self-check code. stdout (a pipe on the runner) is flushed first so
+    # main()'s rows precede the traceback.
     try:
         main()
     except Exception:
